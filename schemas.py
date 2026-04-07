@@ -74,6 +74,9 @@ class OfficeActivity(OfficeActivityBase):
 # Request Schemas
 class RequestBase(BaseModel):
     doctor_id: int
+    territory: Optional[str] = None
+    region: Optional[str] = None
+
     therapy_area: Optional[str] = None
     objective: Optional[str] = None
     expected_outcome: Optional[str] = None
@@ -101,6 +104,9 @@ class RequestSummary(BaseModel):
     doctor_id: int
     requested_by: str
     requested_by_role: str
+    territory: Optional[str] = None
+    region: Optional[str] = None
+
     therapy_area: Optional[str] = None
     objective: Optional[str] = None
     expected_outcome: Optional[str] = None
@@ -111,7 +117,7 @@ class RequestSummary(BaseModel):
     
     class Config:
         from_attributes = True
-
+    
 # User Schemas
 class UserBase(BaseModel):
     username: str

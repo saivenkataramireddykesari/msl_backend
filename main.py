@@ -120,6 +120,19 @@ def duplicate_doctor(doctor_id: int, db: Session = Depends(get_db)):
     db.refresh(new_doctor)
     return new_doctor
 
+
+@app.get("/api/doctor-interactions", response_model=List[schemas.DoctorInteraction])
+def get_doctor_history(
+    doctor_name: str = Query(...),
+    db: Session = Depends(get_db)
+):
+    """Get interaction history by doctor name"""
+    interactions = db.query(models.DoctorInteraction).filter(
+        models.DoctorInteraction.doctor_name == doctor_name
+    ).order_by(models.DoctorInteraction.visit_date.desc()).all()
+
+    return interactions
+    
 @app.delete("/api/doctors/{doctor_id}")
 def delete_doctor(doctor_id: int, db: Session = Depends(get_db)):
     """Delete a doctor"""
@@ -136,60 +149,107 @@ def delete_doctor(doctor_id: int, db: Session = Depends(get_db)):
 @app.post("/api/requests", response_model=schemas.Request)
 def create_request(request: schemas.RequestCreate, db: Session = Depends(get_db)):
     """Create a new MSL engagement request"""
+    # Debug: Log incoming request data
+    request_data = request.dict()
+    print(f"DEBUG - Received request data: {request_data}")
+    print(f"DEBUG - Territory from request: '{request.territory}'")
+    print(f"DEBUG - Region from request: '{request.region}'")
+    print(f"DEBUG - Doctor ID: {request.doctor_id}")
+    
     # Verify doctor exists
     doctor = db.query(models.Doctor).filter(models.Doctor.id == request.doctor_id).first()
     if not doctor:
+        print(f"DEBUG - Doctor not found for ID: {request.doctor_id}")
         raise HTTPException(status_code=404, detail="Doctor not found")
     
-    db_request = models.Request(**request.dict())
-    db.add(db_request)
-    db.commit()
-    db.refresh(db_request)
-    return db_request
-
-@app.get("/api/requests", response_model=List[schemas.RequestSummary])
-def get_requests(
-    requested_by: Optional[str] = None,
-    role: Optional[str] = None,
-    user_classification: Optional[str] = None,
-    db: Session = Depends(get_db)
-):
-    """Get requests with optional filters"""
-    query = db.query(
-        models.Request,
-        models.Doctor.name.label("doctor_name")
-    ).join(models.Doctor, models.Request.doctor_id == models.Doctor.id)
+    print(f"DEBUG - Doctor found: {doctor.name}")
     
-    if requested_by:
-        query = query.filter(models.Request.requested_by == requested_by)
-    if user_classification:
-        query = query.filter(models.Request.user_classification == user_classification)
-    
-    # Role-based filtering
-    if role in ["BL", "BM"]:
-        query = query.filter(models.Request.requested_by_role == role)
-    
-    results = query.order_by(models.Request.created_at.desc()).all()
-    
-    request_summaries = []
-    for result in results:
-        request, doctor_name = result
-        summary = schemas.RequestSummary(
-            id=request.id,
+    try:
+        # Create request with explicit field assignment
+        db_request = models.Request(
             doctor_id=request.doctor_id,
+            territory=request.territory,
+            region=request.region,
             requested_by=request.requested_by,
             requested_by_role=request.requested_by_role,
             therapy_area=request.therapy_area,
             objective=request.objective,
             expected_outcome=request.expected_outcome,
             priority=request.priority,
-            user_classification=request.user_classification,
-            created_at=request.created_at,
-            doctor_name=doctor_name
+            notes=request.notes,
+            user_classification=request.user_classification
         )
-        request_summaries.append(summary)
+        
+        print(f"DEBUG - Request object created with territory='{db_request.territory}', region='{db_request.region}'")
+        
+        db.add(db_request)
+        db.commit()
+        db.refresh(db_request)
+        
+        print(f"DEBUG - After commit: ID={db_request.id}, territory='{db_request.territory}', region='{db_request.region}'")
+        
+        return db_request
+    except Exception as e:
+        print(f"DEBUG - Error creating request: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/requests")
+def get_requests(
+    search: Optional[str] = None,
+    territory: Optional[str] = None,
+    region: Optional[str] = None,
+    therapy: Optional[str] = None,
+    requested_by: Optional[str] = None,
+    role: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    # Query requests with doctor name
+    query = db.query(models.Request, models.Doctor.name.label("doctor_name")).join(
+        models.Doctor, models.Request.doctor_id == models.Doctor.id
+    )
+
+    if search:
+        query = query.filter(models.Doctor.name.ilike(f"%{search}%"))
+
+    if territory:
+        query = query.filter(models.Request.territory == territory)
+
+    if region:
+        query = query.filter(models.Request.region == region)
+
+    if therapy:
+        query = query.filter(models.Request.therapy_area == therapy)
+
+    if requested_by:
+        query = query.filter(models.Request.requested_by == requested_by)
+
+    if role:
+        query = query.filter(models.Request.requested_by_role == role)
+
+    results = query.order_by(models.Request.created_at.desc()).all()
+
+    # Build response manually to ensure all fields are included
+    response_data = []
+    for request, doctor_name in results:
+        response_data.append({
+            "id": request.id,
+            "doctor_id": request.doctor_id,
+            "doctor_name": doctor_name,
+            "territory": request.territory,
+            "region": request.region,
+            "therapy_area": request.therapy_area,
+            "objective": request.objective,
+            "expected_outcome": request.expected_outcome,
+            "priority": request.priority,
+            "user_classification": request.user_classification,
+            "requested_by": request.requested_by,
+            "requested_by_role": request.requested_by_role,
+            "created_at": request.created_at.isoformat() if request.created_at else None
+        })
     
-    return request_summaries
+    return response_data
 
 @app.get("/api/requests/{request_id}", response_model=schemas.Request)
 def get_request(request_id: int, db: Session = Depends(get_db)):
