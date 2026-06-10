@@ -15,6 +15,7 @@ class DoctorBase(BaseModel):
     emp_code: Optional[str] = None
     emp_name: Optional[str] = None
     region: Optional[str] = None
+    patch: Optional[str] = None
     doctor_id_ext: Optional[str] = None
     uid_number: Optional[str] = None
     bm_territory: Optional[str] = None
@@ -35,12 +36,14 @@ class Doctor(DoctorBase):
 class DoctorInteractionBase(BaseModel):
     doctor_name: str
     visit_date: date
+    logged_by: Optional[str] = None
     topics_discussed: Optional[str] = None
-    scientific_depth: Optional[str] = None
-    engagement_quality_interest: Optional[str] = None
-    engagement_quality_participation: Optional[str] = None
-    engagement_quality_objection: Optional[str] = None
     summary: Optional[str] = None
+    outcomes: Optional[str] = None
+    brand_discussed: Optional[str] = None
+    interest_level: Optional[str] = None
+    objections: Optional[str] = None
+    insights_for_marketing: Optional[str] = None
 
 class DoctorInteractionCreate(DoctorInteractionBase):
     request_id: int
@@ -59,6 +62,9 @@ class OfficeActivityBase(BaseModel):
     activity_category: str
     summary: Optional[str] = None
     linked_outputs: Optional[str] = None
+    work_type: Optional[str] = None
+    hours_worked: Optional[float] = None
+    doctors_visited: Optional[int] = None
 
 class OfficeActivityCreate(OfficeActivityBase):
     msl_username: str
@@ -71,6 +77,21 @@ class OfficeActivity(OfficeActivityBase):
     class Config:
         from_attributes = True
 
+class RequestAssignmentLog(BaseModel):
+    id: int
+    request_id: int
+    assigned_by: str
+    previous_msl: Optional[str] = None
+    new_msl: Optional[str] = None
+    assigned_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class RequestAssign(BaseModel):
+    assigned_msl: Optional[str] = None
+    assigned_by: str
+
 # Request Schemas
 class RequestBase(BaseModel):
     doctor_id: int
@@ -82,7 +103,9 @@ class RequestBase(BaseModel):
     expected_outcome: Optional[str] = None
     priority: Optional[str] = None
     notes: Optional[str] = None
+    brand: Optional[str] = None
     user_classification: Optional[str] = "default"
+    assigned_msl: Optional[str] = None
 
 class RequestCreate(RequestBase):
     requested_by: str
@@ -95,6 +118,7 @@ class Request(RequestBase):
     created_at: datetime
     doctor: Optional[Doctor] = None
     doctor_interactions: List[DoctorInteraction] = []
+    assignment_logs: List[RequestAssignmentLog] = []
     
     class Config:
         from_attributes = True
@@ -111,9 +135,11 @@ class RequestSummary(BaseModel):
     objective: Optional[str] = None
     expected_outcome: Optional[str] = None
     priority: Optional[str] = None
+    brand: Optional[str] = None
     user_classification: str
     created_at: datetime
     doctor_name: Optional[str] = None
+    assigned_msl: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -153,6 +179,78 @@ class ActivityLog(BaseModel):
     title: str
     details: Optional[str] = None
     created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+# Monthly Summary Report Schemas
+class MonthlySummaryDoctorInteraction(BaseModel):
+    id: int
+    doctor_name: str
+    visit_date: date
+    topics_discussed: Optional[str] = None
+    summary: Optional[str] = None
+    outcomes: Optional[str] = None
+    brand_discussed: Optional[str] = None
+    interest_level: Optional[str] = None
+    
+    class Config:
+        from_attributes = True
+
+class MonthlySummaryOfficeActivity(BaseModel):
+    id: int
+    activity_date: date
+    activity_category: str
+    summary: Optional[str] = None
+    linked_outputs: Optional[str] = None
+    work_type: Optional[str] = None
+    hours_worked: Optional[float] = None
+    doctors_visited: Optional[int] = None
+    
+    class Config:
+        from_attributes = True
+
+class EmployeeMonthlySummary(BaseModel):
+    employee_id: str
+    employee_name: str
+    month: int
+    year: int
+    month_name: str
+    
+    # Doctor Interactions Summary
+    total_doctor_visits: int
+    unique_doctors_visited: int
+    doctor_interactions: List[MonthlySummaryDoctorInteraction]
+    
+    # Office Activities Summary
+    total_office_activities: int
+    total_hours_worked: float
+    office_activities: List[MonthlySummaryOfficeActivity]
+    
+    # Work Type Breakdown
+    work_type_breakdown: dict  # e.g., {"both done": 5, "worked at office": 3, "call supported": 2}
+    
+    # Activity Categories Breakdown
+    activity_category_breakdown: dict  # e.g., {"Admin": 3, "Training": 2}
+    
+    # Daily Summary
+    daily_summary: List[dict]  # Day-by-day breakdown
+    
+    class Config:
+        from_attributes = True
+
+class MonthlyReportResponse(BaseModel):
+    report_month: int
+    report_year: int
+    report_month_name: str
+    generated_at: datetime
+    employees: List[EmployeeMonthlySummary]
+    
+    # Overall Statistics
+    total_employees: int
+    total_doctor_visits_all: int
+    total_office_activities_all: int
+    total_hours_worked_all: float
     
     class Config:
         from_attributes = True
