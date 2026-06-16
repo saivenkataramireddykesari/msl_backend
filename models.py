@@ -39,13 +39,19 @@ class Request(Base):
     requested_by = Column(String(100), nullable=False)
     requested_by_role = Column(String(50), nullable=False)
     therapy_area = Column(String(255), nullable=True)
-    objective = Column(Text, nullable=True)
-    expected_outcome = Column(Text, nullable=True)
-    priority = Column(String(50), nullable=True)
-    notes = Column(Text, nullable=True)
-    brand = Column(String(255), nullable=True)
+    brand = Column(String(255), nullable=True)  # Reverted to 'brand'
+    objective = Column(Text, nullable=True)     # Reverted to 'objective'
+    expected_outcome = Column(Text, nullable=True) # Reverted
+    priority = Column(String(50), nullable=True)   # Reverted
+    notes = Column(Text, nullable=True)         # Reverted
+    brand2 = Column(String(255), nullable=True)  # Keep 'brand2'
+    objective2 = Column(Text, nullable=True)     # New field
+    expected_outcome2 = Column(Text, nullable=True) # New field
+    priority2 = Column(String(50), nullable=True)   # New field
+    notes2 = Column(Text, nullable=True)         # New field
     user_classification = Column(String(50), default="default")
     assigned_msl = Column(String(255), nullable=True)
+    request_status = Column(String(50), default="Pending", nullable=False)  # Pending, In Progress, Completed
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
@@ -65,9 +71,15 @@ class DoctorInteraction(Base):
     summary = Column(Text, nullable=True)
     outcomes = Column(String(255), nullable=True)
     brand_discussed = Column(String(255), nullable=True)
+    brand2_discussed = Column(String(255), nullable=True)  # Second brand (optional)
     interest_level = Column(String(100), nullable=True)
+    brand2_interest_level = Column(String(100), nullable=True)
     objections = Column(Text, nullable=True)
     insights_for_marketing = Column(Text, nullable=True)
+    # Per-brand topics and summaries
+    brand2_topics = Column(Text, nullable=True)
+    brand2_summary = Column(Text, nullable=True)
+    brand2_outcomes = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationship
@@ -82,7 +94,7 @@ class OfficeActivity(Base):
     activity_category = Column(String(100), nullable=False)
     summary = Column(Text, nullable=True)
     linked_outputs = Column(Text, nullable=True)
-    work_type = Column(String(100), nullable=True)  # 'worked at office', 'call supported', 'both done', 'nothing done'
+    work_type = Column(String(100), nullable=True)  # \'worked at office\', \'call supported\', \'both done\', \'nothing done\'
     hours_worked = Column(Float, nullable=True)
     doctors_visited = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

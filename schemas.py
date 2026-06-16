@@ -41,9 +41,14 @@ class DoctorInteractionBase(BaseModel):
     summary: Optional[str] = None
     outcomes: Optional[str] = None
     brand_discussed: Optional[str] = None
+    brand2_discussed: Optional[str] = None
     interest_level: Optional[str] = None
+    brand2_interest_level: Optional[str] = None
     objections: Optional[str] = None
     insights_for_marketing: Optional[str] = None
+    brand2_topics: Optional[str] = None
+    brand2_summary: Optional[str] = None
+    brand2_outcomes: Optional[str] = None
 
 class DoctorInteractionCreate(DoctorInteractionBase):
     request_id: int
@@ -97,15 +102,20 @@ class RequestBase(BaseModel):
     doctor_id: int
     territory: Optional[str] = None
     region: Optional[str] = None
-
     therapy_area: Optional[str] = None
+    brand: Optional[str] = None
     objective: Optional[str] = None
     expected_outcome: Optional[str] = None
     priority: Optional[str] = None
     notes: Optional[str] = None
-    brand: Optional[str] = None
+    brand2: Optional[str] = None
+    objective2: Optional[str] = None
+    expected_outcome2: Optional[str] = None
+    priority2: Optional[str] = None
+    notes2: Optional[str] = None
     user_classification: Optional[str] = "default"
     assigned_msl: Optional[str] = None
+    request_status: Optional[str] = "Pending"
 
 class RequestCreate(RequestBase):
     requested_by: str
@@ -132,14 +142,21 @@ class RequestSummary(BaseModel):
     region: Optional[str] = None
 
     therapy_area: Optional[str] = None
+    brand: Optional[str] = None
     objective: Optional[str] = None
     expected_outcome: Optional[str] = None
     priority: Optional[str] = None
-    brand: Optional[str] = None
+    notes: Optional[str] = None
+    brand2: Optional[str] = None
+    objective2: Optional[str] = None
+    expected_outcome2: Optional[str] = None
+    priority2: Optional[str] = None
+    notes2: Optional[str] = None
     user_classification: str
+    assigned_msl: Optional[str] = None
+    request_status: Optional[str] = "Pending"
     created_at: datetime
     doctor_name: Optional[str] = None
-    assigned_msl: Optional[str] = None
     
     class Config:
         from_attributes = True

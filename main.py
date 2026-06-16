@@ -54,7 +54,7 @@ def get_users(db: Session = Depends(get_db)):
 @app.get("/api/users/msls")
 def get_msl_users(db: Session = Depends(get_db)):
     """Get only MSL and Scientific Officer users for assignment dropdown"""
-    msl_roles = ['MSL', 'Scientific Officer']
+    msl_roles = ["MSL", "Scientific Officer"]
     users = db.query(models.User).filter(models.User.role.in_(msl_roles)).all()
     return [
         {
@@ -248,8 +248,8 @@ def create_request(request: schemas.RequestCreate, db: Session = Depends(get_db)
     # Debug: Log incoming request data
     request_data = request.model_dump()
     print(f"DEBUG - Received request data: {request_data}")
-    print(f"DEBUG - Territory from request: '{request.territory}'")
-    print(f"DEBUG - Region from request: '{request.region}'")
+    print(f"DEBUG - Territory from request: \'{request.territory}\'")
+    print(f"DEBUG - Region from request: \'{request.region}\'")
     print(f"DEBUG - Doctor ID: {request.doctor_id}")
     
     # Verify doctor exists
@@ -269,20 +269,26 @@ def create_request(request: schemas.RequestCreate, db: Session = Depends(get_db)
             requested_by=request.requested_by,
             requested_by_role=request.requested_by_role,
             therapy_area=request.therapy_area,
-            objective=request.objective,
-            expected_outcome=request.expected_outcome,
-            priority=request.priority,
-            notes=request.notes,
-            brand=request.brand
+            brand=request.brand,             # Reverted
+            objective=request.objective,     # Reverted
+            expected_outcome=request.expected_outcome, # Reverted
+            priority=request.priority,       # Reverted
+            notes=request.notes,             # Reverted
+            brand2=request.brand2,
+            objective2=request.objective2,
+            expected_outcome2=request.expected_outcome2,
+            priority2=request.priority2,
+            notes2=request.notes2,
+            request_status="Pending"
         )
         
-        print(f"DEBUG - Request object created with territory='{db_request.territory}', region='{db_request.region}'")
+        print(f"DEBUG - Request object created with territory=\'{db_request.territory}\'", "region=\'{db_request.region}\'")
         
         db.add(db_request)
         db.commit()
         db.refresh(db_request)
         
-        print(f"DEBUG - After commit: ID={db_request.id}, territory='{db_request.territory}', region='{db_request.region}'")
+        print(f"DEBUG - After commit: ID={db_request.id}, territory=\'{db_request.territory}\'", "region=\'{db_request.region}\'")
         
         return db_request
     except Exception as e:
@@ -302,16 +308,29 @@ def get_requests(
     username: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    # Query requests with doctor name
-    query = db.query(models.Request, models.Doctor.name.label("doctor_name")).join(
+    # Subquery: count doctor interactions per request
+    interaction_count_subq = db.query(
+        models.DoctorInteraction.request_id,
+        func.count(models.DoctorInteraction.id).label("visit_count")
+    ).group_by(models.DoctorInteraction.request_id).subquery()
+
+    # Query requests with doctor name, division, and visit count
+    query = db.query(
+        models.Request,
+        models.Doctor.name.label("doctor_name"),
+        models.Doctor.division.label("division"),
+        interaction_count_subq.c.visit_count
+    ).join(
         models.Doctor, models.Request.doctor_id == models.Doctor.id
+    ).outerjoin(
+        interaction_count_subq, models.Request.id == interaction_count_subq.c.request_id
     )
 
     # Filter based on role and username
-    if role in ['MSL', 'Scientific Officer']:
+    if role in ["MSL", "Scientific Officer"]:
         if username:
             query = query.filter(models.Request.assigned_msl == username)
-    elif role in ['BL', 'BM']:
+    elif role in ["BL", "BM"]:
         if username:
             query = query.filter(models.Request.requested_by == username)
 
@@ -334,7 +353,7 @@ def get_requests(
 
     # Build response manually to ensure all fields are included
     response_data = []
-    for request, doctor_name in results:
+    for request, doctor_name, division, visit_count in results:
         response_data.append({
             "id": request.id,
             "doctor_id": request.doctor_id,
@@ -342,14 +361,22 @@ def get_requests(
             "territory": request.territory,
             "region": request.region,
             "therapy_area": request.therapy_area,
+            "brand": request.brand,
             "objective": request.objective,
             "expected_outcome": request.expected_outcome,
             "priority": request.priority,
-            "brand": request.brand,
+            "notes": request.notes,
+            "brand2": request.brand2,
+            "objective2": request.objective2,
+            "expected_outcome2": request.expected_outcome2,
+            "priority2": request.priority2,
+            "notes2": request.notes2,
             "user_classification": request.user_classification,
             "requested_by": request.requested_by,
             "requested_by_role": request.requested_by_role,
             "assigned_msl": request.assigned_msl,
+            "request_status": request.request_status or "Pending",
+            "num_visits": visit_count or 0,
             "created_at": request.created_at.isoformat() if request.created_at else None
         })
     
@@ -368,7 +395,7 @@ def get_request(
         raise HTTPException(status_code=404, detail="Request not found")
         
     # Enforce that MSLs can only view requests assigned to them
-    if role in ['MSL', 'Scientific Officer']:
+    if role in ["MSL", "Scientific Officer"]:
         if request.assigned_msl != username:
             raise HTTPException(status_code=403, detail="Access denied. You are not assigned to this request.")
             
@@ -388,9 +415,15 @@ def assign_request(
     previous_msl = request.assigned_msl
     new_msl = assign_data.assigned_msl
     
-    # Only log and update if there's an actual change
+    # Only log and update if there\\'s an actual change
     if previous_msl != new_msl:
         request.assigned_msl = new_msl
+        
+        # Auto-update request_status based on assignment
+        if new_msl:
+            request.request_status = "In Progress"
+        else:
+            request.request_status = "Pending"
         
         # Create history log entry
         log_entry = models.RequestAssignmentLog(
@@ -417,7 +450,7 @@ def update_request_user_classification(
     """Update request user classification (potential, non-potential, or default) and sync to doctor profile"""
     valid_classifications = ["potential", "non-potential", "default"]
     if user_classification not in valid_classifications:
-        raise HTTPException(status_code=400, detail="Invalid user classification. Must be 'potential', 'non-potential', or 'default'")
+        raise HTTPException(status_code=400, detail="Invalid user classification. Must be \\'potential\\', \\'non-potential\\', or \\'default\\'")
     
     request = db.query(models.Request).filter(models.Request.id == request_id).first()
     if not request:
@@ -426,14 +459,14 @@ def update_request_user_classification(
     # Update request classification
     request.user_classification = user_classification
     
-    # Sync to doctor profile - update the doctor's priority status based on classification
+    # Sync to doctor profile - update the doctor\\'s priority status based on classification
     doctor = db.query(models.Doctor).filter(models.Doctor.id == request.doctor_id).first()
     if doctor:
         if user_classification == "potential":
             doctor.is_priority_doctor = True
         elif user_classification == "non-potential":
             doctor.is_priority_doctor = False
-        # For "default", keep the doctor's current priority status
+        # For "default", keep the doctor\\'s current priority status
     
     db.commit()
     return {
@@ -629,7 +662,7 @@ def get_request_logs(request_id: int, db: Session = Depends(get_db)):
 def get_monthly_employee_summary(
     month: int = Query(..., ge=1, le=12, description="Month (1-12)"),
     year: int = Query(..., ge=2000, le=2100, description="Year (e.g., 2024)"),
-    employee_ids: Optional[str] = Query(None, description="Comma-separated employee IDs (e.g., 'E9250,E5057')"),
+    employee_ids: Optional[str] = Query(None, description="Comma-separated employee IDs (e.g., \'E9250,E5057\')"),
     db: Session = Depends(get_db)
 ):
     """
@@ -640,7 +673,7 @@ def get_monthly_employee_summary(
         # Parse employee IDs if provided
         target_employee_ids = []
         if employee_ids:
-            target_employee_ids = [eid.strip() for eid in employee_ids.split(',')]
+            target_employee_ids = [eid.strip() for eid in employee_ids.split(",")]
         
         # Get all users or filter by specific employee IDs
         users_query = db.query(models.User)
@@ -666,15 +699,15 @@ def get_monthly_employee_summary(
             # Get doctor interactions for this user in the specified month
             doctor_interactions = db.query(models.DoctorInteraction).filter(
                 models.DoctorInteraction.logged_by == user.username,
-                extract('month', models.DoctorInteraction.visit_date) == month,
-                extract('year', models.DoctorInteraction.visit_date) == year
+                extract("month", models.DoctorInteraction.visit_date) == month,
+                extract("year", models.DoctorInteraction.visit_date) == year
             ).order_by(models.DoctorInteraction.visit_date.desc()).all()
             
             # Get office activities for this user in the specified month
             office_activities = db.query(models.OfficeActivity).filter(
                 models.OfficeActivity.msl_username == user.username,
-                extract('month', models.OfficeActivity.activity_date) == month,
-                extract('year', models.OfficeActivity.activity_date) == year
+                extract("month", models.OfficeActivity.activity_date) == month,
+                extract("year", models.OfficeActivity.activity_date) == year
             ).order_by(models.OfficeActivity.activity_date.desc()).all()
             
             # Calculate unique doctors visited
@@ -721,7 +754,6 @@ def get_monthly_employee_summary(
                     daily_summary_map[day_key] = {
                         "date": day_key,
                         "day": activity.activity_date.day,
-                        "doctor_visits": 0,
                         "office_activities": 0,
                         "hours_worked": 0.0,
                         "work_type": activity.work_type
