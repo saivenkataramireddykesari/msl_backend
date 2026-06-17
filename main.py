@@ -376,6 +376,8 @@ def get_requests(
             "requested_by_role": request.requested_by_role,
             "assigned_msl": request.assigned_msl,
             "request_status": request.request_status or "Pending",
+            "rx_status_brand1": request.rx_status_brand1,
+            "rx_status_brand2": request.rx_status_brand2,
             "num_visits": visit_count or 0,
             "created_at": request.created_at.isoformat() if request.created_at else None
         })
@@ -419,11 +421,17 @@ def assign_request(
     if previous_msl != new_msl:
         request.assigned_msl = new_msl
         
-        # Auto-update request_status based on assignment
+        # Auto-update request_status and brand statuses based on assignment
         if new_msl:
             request.request_status = "In Progress"
+            request.brand1_status = "In Progress"
+            if request.brand2:
+                request.brand2_status = "In Progress"
         else:
             request.request_status = "Pending"
+            request.brand1_status = "Pending"
+            if request.brand2:
+                request.brand2_status = "Pending"
         
         # Create history log entry
         log_entry = models.RequestAssignmentLog(
@@ -475,6 +483,37 @@ def update_request_user_classification(
         "doctor_updated": doctor is not None
     }
 
+@app.put("/api/requests/{request_id}/rx-status")
+def update_rx_status(
+    request_id: int,
+    rx_status_brand1: Optional[str] = Query(None, description="RX status for brand 1: potential, non-potential, default"),
+    rx_status_brand2: Optional[str] = Query(None, description="RX status for brand 2: potential, non-potential, default"),
+    db: Session = Depends(get_db)
+):
+    """Update per-brand RX status for a request"""
+    valid_statuses = ["potential", "non-potential", "default"]
+    
+    request = db.query(models.Request).filter(models.Request.id == request_id).first()
+    if not request:
+        raise HTTPException(status_code=404, detail="Request not found")
+    
+    if rx_status_brand1 is not None:
+        if rx_status_brand1 not in valid_statuses:
+            raise HTTPException(status_code=400, detail=f"Invalid rx_status_brand1. Must be one of: {valid_statuses}")
+        request.rx_status_brand1 = rx_status_brand1
+    
+    if rx_status_brand2 is not None:
+        if rx_status_brand2 not in valid_statuses:
+            raise HTTPException(status_code=400, detail=f"Invalid rx_status_brand2. Must be one of: {valid_statuses}")
+        request.rx_status_brand2 = rx_status_brand2
+    
+    db.commit()
+    return {
+        "message": "RX status updated successfully",
+        "rx_status_brand1": request.rx_status_brand1,
+        "rx_status_brand2": request.rx_status_brand2
+    }
+
 # ==================== DOCTOR INTERACTIONS ====================
 
 @app.post("/api/doctor-interactions", response_model=schemas.DoctorInteraction)
@@ -482,15 +521,38 @@ def create_doctor_interaction(
     interaction: schemas.DoctorInteractionCreate,
     db: Session = Depends(get_db)
 ):
-    """Log a doctor interaction"""
+    """Log a doctor interaction with dynamic brand details"""
     # Verify request exists
     request = db.query(models.Request).filter(models.Request.id == interaction.request_id).first()
     if not request:
         raise HTTPException(status_code=404, detail="Request not found")
     
-    db_interaction = models.DoctorInteraction(**interaction.model_dump())
+    # Extract brands data if provided
+    brands_data = interaction.brands if hasattr(interaction, 'brands') and interaction.brands else []
+    
+    # Create the interaction without the brands field
+    interaction_dict = interaction.model_dump(exclude={'brands'})
+    db_interaction = models.DoctorInteraction(**interaction_dict)
     db.add(db_interaction)
     db.commit()
+    db.refresh(db_interaction)
+    
+    # Create brand entries if provided
+    if brands_data:
+        for brand_data in brands_data:
+            db_brand = models.InteractionBrand(
+                interaction_id=db_interaction.id,
+                brand_name=brand_data.brand_name,
+                objective=brand_data.objective,
+                insights_marketing=brand_data.insights_marketing,
+                topics_discussed=brand_data.topics_discussed,
+                summary=brand_data.summary,
+                outcomes=brand_data.outcomes,
+                interest_level=brand_data.interest_level
+            )
+            db.add(db_brand)
+        db.commit()
+    
     db.refresh(db_interaction)
     return db_interaction
 
@@ -636,19 +698,32 @@ def get_request_logs(request_id: int, db: Session = Depends(get_db)):
     
     logs = []
     
-    # Get doctor interactions
+    # Get doctor interactions with their brands
     interactions = db.query(models.DoctorInteraction).filter(
         models.DoctorInteraction.request_id == request_id
     ).all()
     
     for interaction in interactions:
+        # Get brand names from the new brands relationship
+        brand_names = []
+        if interaction.brands:
+            brand_names = [b.brand_name for b in interaction.brands if b.brand_name]
+        # Fallback to legacy fields if no brands array
+        if not brand_names:
+            if interaction.brand_discussed:
+                brand_names.append(interaction.brand_discussed)
+            if interaction.brand2_discussed:
+                brand_names.append(interaction.brand2_discussed)
+        
         logs.append(schemas.ActivityLog(
             id=interaction.id,
             type="doctor_interaction",
             date=interaction.visit_date,
-            title=f"Doctor Visit: {interaction.doctor_name}",
+            title=f"Visit by {interaction.logged_by or 'Unknown'}",
             details=interaction.summary,
-            created_at=interaction.created_at
+            created_at=interaction.created_at,
+            brands=brand_names if brand_names else None,
+            logged_by=interaction.logged_by
         ))
     
     # Sort by date (latest first)

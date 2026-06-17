@@ -3,6 +3,24 @@ from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
 
+class InteractionBrand(Base):
+    """Stores brand-specific details for doctor interactions (dynamic, unlimited brands)"""
+    __tablename__ = "interaction_brands"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    interaction_id = Column(Integer, ForeignKey("doctor_interactions.id", ondelete="CASCADE"), nullable=False)
+    brand_name = Column(String(255), nullable=False)  # Brand name (e.g., Aztor, Rozucor, or custom)
+    objective = Column(Text, nullable=True)  # Objective for this brand
+    insights_marketing = Column(Text, nullable=True)  # Insights for marketing for this brand
+    topics_discussed = Column(Text, nullable=True)  # Topics discussed for this brand
+    summary = Column(Text, nullable=True)  # Summary for this brand
+    outcomes = Column(String(255), nullable=True)  # Outcomes for this brand
+    interest_level = Column(String(100), nullable=True)  # Interest level for this brand
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationship
+    interaction = relationship("DoctorInteraction", back_populates="brands")
+
 class Doctor(Base):
     __tablename__ = "doctors"
     
@@ -52,6 +70,10 @@ class Request(Base):
     user_classification = Column(String(50), default="default")
     assigned_msl = Column(String(255), nullable=True)
     request_status = Column(String(50), default="Pending", nullable=False)  # Pending, In Progress, Completed
+    
+    # Per-brand RX status tracking
+    rx_status_brand1 = Column(String(50), nullable=True)  # RX status for brand 1 (e.g., Potential, Non-Potential, Default)
+    rx_status_brand2 = Column(String(50), nullable=True)  # RX status for brand 2 (null if no brand2)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
@@ -67,23 +89,24 @@ class DoctorInteraction(Base):
     logged_by = Column(String(255), nullable=True)  # MSL username who logged this visit
     doctor_name = Column(String(255), nullable=False)
     visit_date = Column(Date, nullable=False)
-    topics_discussed = Column(Text, nullable=True)
-    summary = Column(Text, nullable=True)
-    outcomes = Column(String(255), nullable=True)
-    brand_discussed = Column(String(255), nullable=True)
-    brand2_discussed = Column(String(255), nullable=True)  # Second brand (optional)
-    interest_level = Column(String(100), nullable=True)
-    brand2_interest_level = Column(String(100), nullable=True)
+    topics_discussed = Column(Text, nullable=True)  # Legacy: kept for backward compatibility
+    summary = Column(Text, nullable=True)  # Legacy: kept for backward compatibility
+    outcomes = Column(String(255), nullable=True)  # Legacy: kept for backward compatibility
+    brand_discussed = Column(String(255), nullable=True)  # Legacy: kept for backward compatibility
+    brand2_discussed = Column(String(255), nullable=True)  # Legacy: kept for backward compatibility
+    interest_level = Column(String(100), nullable=True)  # Legacy: kept for backward compatibility
+    brand2_interest_level = Column(String(100), nullable=True)  # Legacy: kept for backward compatibility
     objections = Column(Text, nullable=True)
-    insights_for_marketing = Column(Text, nullable=True)
-    # Per-brand topics and summaries
-    brand2_topics = Column(Text, nullable=True)
-    brand2_summary = Column(Text, nullable=True)
-    brand2_outcomes = Column(String(255), nullable=True)
+    insights_for_marketing = Column(Text, nullable=True)  # Legacy: kept for backward compatibility
+    # Per-brand topics and summaries (Legacy)
+    brand2_topics = Column(Text, nullable=True)  # Legacy: kept for backward compatibility
+    brand2_summary = Column(Text, nullable=True)  # Legacy: kept for backward compatibility
+    brand2_outcomes = Column(String(255), nullable=True)  # Legacy: kept for backward compatibility
     created_at = Column(DateTime, default=datetime.utcnow)
     
-    # Relationship
+    # Relationships
     request = relationship("Request", back_populates="doctor_interactions")
+    brands = relationship("InteractionBrand", back_populates="interaction", cascade="all, delete-orphan")
 
 class OfficeActivity(Base):
     __tablename__ = "office_activities"
@@ -94,7 +117,7 @@ class OfficeActivity(Base):
     activity_category = Column(String(100), nullable=False)
     summary = Column(Text, nullable=True)
     linked_outputs = Column(Text, nullable=True)
-    work_type = Column(String(100), nullable=True)  # \'worked at office\', \'call supported\', \'both done\', \'nothing done\'
+    work_type = Column(String(100), nullable=True)  # 'worked at office', 'call supported', 'both done', 'nothing done'
     hours_worked = Column(Float, nullable=True)
     doctors_visited = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -120,4 +143,82 @@ class User(Base):
     password = Column(String(255), nullable=False)
     employee_id = Column(String(50), unique=True, nullable=False)
     role = Column(String(100), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+# Configuration Models for Dynamic Data
+class Brand(Base):
+    """Stores available brands for selection"""
+    __tablename__ = "brands"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False, unique=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Priority(Base):
+    """Stores available priority levels"""
+    __tablename__ = "priorities"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), nullable=False, unique=True)
+    display_order = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class UserClassification(Base):
+    """Stores available user classifications"""
+    __tablename__ = "user_classifications"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), nullable=False, unique=True)
+    display_name = Column(String(100), nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class RXStatus(Base):
+    """Stores available RX status options"""
+    __tablename__ = "rx_statuses"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), nullable=False, unique=True)
+    display_name = Column(String(100), nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class InterestLevel(Base):
+    """Stores available interest level options"""
+    __tablename__ = "interest_levels"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), nullable=False, unique=True)
+    display_order = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Outcome(Base):
+    """Stores available outcome options for interactions"""
+    __tablename__ = "outcomes"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False, unique=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class ActivityCategory(Base):
+    """Stores available activity categories for office activities"""
+    __tablename__ = "activity_categories"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False, unique=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class RequestStatus(Base):
+    """Stores available request statuses"""
+    __tablename__ = "request_statuses"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(50), nullable=False, unique=True)
+    display_name = Column(String(100), nullable=False)
+    is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)

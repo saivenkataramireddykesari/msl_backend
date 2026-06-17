@@ -32,23 +32,45 @@ class Doctor(DoctorBase):
     class Config:
         from_attributes = True
 
+# Interaction Brand Schemas (for dynamic brand entries)
+class InteractionBrandBase(BaseModel):
+    brand_name: str
+    objective: Optional[str] = None
+    insights_marketing: Optional[str] = None
+    topics_discussed: Optional[str] = None
+    summary: Optional[str] = None
+    outcomes: Optional[str] = None
+    interest_level: Optional[str] = None
+
+class InteractionBrandCreate(InteractionBrandBase):
+    pass
+
+class InteractionBrand(InteractionBrandBase):
+    id: int
+    interaction_id: int
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
 # Doctor Interaction Schemas
 class DoctorInteractionBase(BaseModel):
     doctor_name: str
     visit_date: date
     logged_by: Optional[str] = None
-    topics_discussed: Optional[str] = None
-    summary: Optional[str] = None
-    outcomes: Optional[str] = None
-    brand_discussed: Optional[str] = None
-    brand2_discussed: Optional[str] = None
-    interest_level: Optional[str] = None
-    brand2_interest_level: Optional[str] = None
+    topics_discussed: Optional[str] = None  # Legacy field
+    summary: Optional[str] = None  # Legacy field
+    outcomes: Optional[str] = None  # Legacy field
+    brand_discussed: Optional[str] = None  # Legacy field
+    brand2_discussed: Optional[str] = None  # Legacy field
+    interest_level: Optional[str] = None  # Legacy field
+    brand2_interest_level: Optional[str] = None  # Legacy field
     objections: Optional[str] = None
-    insights_for_marketing: Optional[str] = None
-    brand2_topics: Optional[str] = None
-    brand2_summary: Optional[str] = None
-    brand2_outcomes: Optional[str] = None
+    insights_for_marketing: Optional[str] = None  # Legacy field
+    brand2_topics: Optional[str] = None  # Legacy field
+    brand2_summary: Optional[str] = None  # Legacy field
+    brand2_outcomes: Optional[str] = None  # Legacy field
+    brands: Optional[List[InteractionBrandBase]] = []  # New dynamic brands array
 
 class DoctorInteractionCreate(DoctorInteractionBase):
     request_id: int
@@ -57,6 +79,7 @@ class DoctorInteraction(DoctorInteractionBase):
     id: int
     request_id: int
     created_at: datetime
+    brands: List[InteractionBrand] = []
     
     class Config:
         from_attributes = True
@@ -116,6 +139,8 @@ class RequestBase(BaseModel):
     user_classification: Optional[str] = "default"
     assigned_msl: Optional[str] = None
     request_status: Optional[str] = "Pending"
+    rx_status_brand1: Optional[str] = None
+    rx_status_brand2: Optional[str] = None
 
 class RequestCreate(RequestBase):
     requested_by: str
@@ -155,6 +180,8 @@ class RequestSummary(BaseModel):
     user_classification: str
     assigned_msl: Optional[str] = None
     request_status: Optional[str] = "Pending"
+    rx_status_brand1: Optional[str] = None
+    rx_status_brand2: Optional[str] = None
     created_at: datetime
     doctor_name: Optional[str] = None
     
@@ -196,6 +223,8 @@ class ActivityLog(BaseModel):
     title: str
     details: Optional[str] = None
     created_at: datetime
+    brands: Optional[List[str]] = None  # List of brand names discussed
+    logged_by: Optional[str] = None  # MSL who logged the visit
     
     class Config:
         from_attributes = True
@@ -210,6 +239,7 @@ class MonthlySummaryDoctorInteraction(BaseModel):
     outcomes: Optional[str] = None
     brand_discussed: Optional[str] = None
     interest_level: Optional[str] = None
+    brands: List[InteractionBrand] = []  # New dynamic brands
     
     class Config:
         from_attributes = True
