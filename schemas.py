@@ -209,6 +209,9 @@ class LoginRequest(BaseModel):
     employee_id: str
     password: str
 
+class UrlLoginRequest(BaseModel):
+    employee_id: str
+
 class LoginResponse(BaseModel):
     username: str
     role: str

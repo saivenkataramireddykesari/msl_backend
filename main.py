@@ -45,6 +45,21 @@ def login(login_data: schemas.LoginRequest, db: Session = Depends(get_db)):
         "message": "Login successful"
     }
 
+@app.post("/api/login-by-employee-id", response_model=schemas.LoginResponse)
+def login_by_employee_id(login_data: schemas.UrlLoginRequest, db: Session = Depends(get_db)):
+    """Login using employee_id only (passwordless)"""
+    user = db.query(models.User).filter(models.User.employee_id == login_data.employee_id).first()
+    
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid employee ID")
+    
+    return {
+        "username": user.username,
+        "role": user.role,
+        "employee_id": user.employee_id,
+        "message": "Login successful"
+    }
+
 @app.get("/api/users", response_model=List[schemas.User])
 def get_users(db: Session = Depends(get_db)):
     """Get all users"""
