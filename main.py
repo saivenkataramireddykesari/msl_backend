@@ -17,8 +17,13 @@ app = FastAPI(title="MSL Engagement Management System")
 # CORS middleware — allow all origins for dev compatibility
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://msl-frontend.netlify.app",
+        "https://*.netlify.app",
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -28,35 +33,57 @@ app.add_middleware(
 @app.post("/api/login", response_model=schemas.LoginResponse)
 def login(login_data: schemas.LoginRequest, db: Session = Depends(get_db)):
     """Login using employee_id and password"""
-    # Find user by employee_id
-    user = db.query(models.User).filter(models.User.employee_id == login_data.employee_id).first()
+    # Normalize the employee ID: strip whitespace and convert to uppercase for case-insensitive comparison
+    normalized_employee_id = login_data.employee_id.strip().upper()
+    
+    # Find user by Emp_Code with case-insensitive comparison
+    user = db.query(models.User).filter(
+        func.upper(func.trim(models.User.Emp_Code)) == normalized_employee_id
+    ).first()
     
     if not user:
+        print(f"DEBUG: Login failed - User not found for employee_id: {login_data.employee_id} (normalized: {normalized_employee_id})")
         raise HTTPException(status_code=401, detail="Invalid employee ID or password")
+    
+    # If user has no password set, reject password-based login
+    if user.password is None:
+        raise HTTPException(status_code=401, detail="Password not set for this user. Use passwordless login.")
     
     # Simple password check (no hashing as requested)
     if user.password != login_data.password:
         raise HTTPException(status_code=401, detail="Invalid employee ID or password")
     
     return {
-        "username": user.username,
-        "role": user.role,
-        "employee_id": user.employee_id,
+        "username": user.Emp_Name,
+        "role": user.Role,
+        "employee_id": user.Emp_Code,
         "message": "Login successful"
     }
 
 @app.post("/api/login-by-employee-id", response_model=schemas.LoginResponse)
 def login_by_employee_id(login_data: schemas.UrlLoginRequest, db: Session = Depends(get_db)):
     """Login using employee_id only (passwordless)"""
-    user = db.query(models.User).filter(models.User.employee_id == login_data.employee_id).first()
+    # Normalize the employee ID: strip whitespace and convert to uppercase for case-insensitive comparison
+    normalized_employee_id = login_data.employee_id.strip().upper()
+    
+    print(f"DEBUG: Passwordless login attempt - Original: '{login_data.employee_id}', Normalized: '{normalized_employee_id}'")
+    
+    # Use func.upper for case-insensitive comparison in the database
+    user = db.query(models.User).filter(
+        func.upper(func.trim(models.User.Emp_Code)) == normalized_employee_id
+    ).first()
     
     if not user:
+        print(f"DEBUG: Passwordless login failed - User not found for normalized ID: {normalized_employee_id}")
+        # List available Emp_Codes for debugging (first 10)
+        available_codes = db.query(models.User.Emp_Code).limit(10).all()
+        print(f"DEBUG: Sample Emp_Codes in DB: {[code[0] for code in available_codes if code[0]]}")
         raise HTTPException(status_code=401, detail="Invalid employee ID")
     
     return {
-        "username": user.username,
-        "role": user.role,
-        "employee_id": user.employee_id,
+        "username": user.Emp_Name,
+        "role": user.Role,
+        "employee_id": user.Emp_Code,
         "message": "Login successful"
     }
 
@@ -70,13 +97,13 @@ def get_users(db: Session = Depends(get_db)):
 def get_msl_users(db: Session = Depends(get_db)):
     """Get only MSL and Scientific Officer users for assignment dropdown"""
     msl_roles = ["MSL", "Scientific Officer"]
-    users = db.query(models.User).filter(models.User.role.in_(msl_roles)).all()
+    users = db.query(models.User).filter(models.User.Role.in_(msl_roles)).all()
     return [
         {
             "id": u.id,
-            "username": u.username,
-            "employee_id": u.employee_id,
-            "role": u.role,
+            "username": u.Emp_Name,
+            "employee_id": u.Emp_Code,
+            "role": u.Role,
         }
         for u in users
     ]
@@ -100,12 +127,20 @@ def get_doctors(
 
 @app.post("/api/doctors", response_model=schemas.Doctor)
 def create_doctor(doctor: schemas.DoctorCreate, db: Session = Depends(get_db)):
-    """Create a new doctor"""
-    db_doctor = models.Doctor(**doctor.model_dump())
-    db.add(db_doctor)
-    db.commit()
-    db.refresh(db_doctor)
-    return db_doctor
+    """Create a new doctor with transaction safety"""
+    try:
+        db_doctor = models.Doctor(**doctor.model_dump())
+        db.add(db_doctor)
+        db.commit()
+        db.refresh(db_doctor)
+        print(f"DEBUG - Doctor created successfully: ID={db_doctor.id}, Name={db_doctor.name}")
+        return db_doctor
+    except Exception as e:
+        db.rollback()
+        print(f"ERROR - Failed to create doctor: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to create doctor: {str(e)}")
 
 # ==================== CASCADING DROPDOWNS FOR BL ====================
 # NOTE: These routes MUST be defined BEFORE the /api/doctors/{doctor_id} route
@@ -203,45 +238,66 @@ def get_doctor(doctor_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/doctors/{doctor_id}/duplicate", response_model=schemas.Doctor)
 def duplicate_doctor(doctor_id: int, db: Session = Depends(get_db)):
-    """Duplicate a doctor"""
-    doctor = db.query(models.Doctor).filter(models.Doctor.id == doctor_id).first()
-    if not doctor:
-        raise HTTPException(status_code=404, detail="Doctor not found")
-    
-    # Create a duplicate with "(Copy)" suffix
-    new_doctor = models.Doctor(
-        name=f"{doctor.name} (Copy)",
-        speciality=doctor.speciality,
-        therapy_area=doctor.therapy_area,
-        is_priority_doctor=doctor.is_priority_doctor,
-        division=doctor.division,
-        territory=doctor.territory,
-        emp_code=doctor.emp_code,
-        emp_name=doctor.emp_name,
-        region=doctor.region,
-        patch=doctor.patch,
-        doctor_id_ext=doctor.doctor_id_ext,
-        uid_number=doctor.uid_number,
-        bm_territory=doctor.bm_territory,
-        bl_territory=doctor.bl_territory,
-        bh_territory=doctor.bh_territory,
-        sbuh_territory=doctor.sbuh_territory,
-    )
-    db.add(new_doctor)
-    db.commit()
-    db.refresh(new_doctor)
-    return new_doctor
+    """Duplicate a doctor with transaction safety"""
+    try:
+        doctor = db.query(models.Doctor).filter(models.Doctor.id == doctor_id).first()
+        if not doctor:
+            raise HTTPException(status_code=404, detail="Doctor not found")
+        
+        # Create a duplicate with "(Copy)" suffix
+        new_doctor = models.Doctor(
+            name=f"{doctor.name} (Copy)",
+            speciality=doctor.speciality,
+            therapy_area=doctor.therapy_area,
+            is_priority_doctor=doctor.is_priority_doctor,
+            division=doctor.division,
+            territory=doctor.territory,
+            emp_code=doctor.emp_code,
+            emp_name=doctor.emp_name,
+            region=doctor.region,
+            patch=doctor.patch,
+            doctor_id_ext=doctor.doctor_id_ext,
+            uid_number=doctor.uid_number,
+            bm_territory=doctor.bm_territory,
+            bl_territory=doctor.bl_territory,
+            bh_territory=doctor.bh_territory,
+            sbuh_territory=doctor.sbuh_territory,
+        )
+        db.add(new_doctor)
+        db.commit()
+        db.refresh(new_doctor)
+        print(f"DEBUG - Doctor duplicated successfully: Original ID={doctor_id}, New ID={new_doctor.id}")
+        return new_doctor
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"ERROR - Failed to duplicate doctor: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to duplicate doctor: {str(e)}")
 
 @app.delete("/api/doctors/{doctor_id}")
 def delete_doctor(doctor_id: int, db: Session = Depends(get_db)):
-    """Delete a doctor"""
-    doctor = db.query(models.Doctor).filter(models.Doctor.id == doctor_id).first()
-    if not doctor:
-        raise HTTPException(status_code=404, detail="Doctor not found")
-    
-    db.delete(doctor)
-    db.commit()
-    return {"message": "Doctor deleted successfully"}
+    """Delete a doctor with transaction safety"""
+    try:
+        doctor = db.query(models.Doctor).filter(models.Doctor.id == doctor_id).first()
+        if not doctor:
+            raise HTTPException(status_code=404, detail="Doctor not found")
+        
+        doctor_name = doctor.name
+        db.delete(doctor)
+        db.commit()
+        print(f"DEBUG - Doctor deleted successfully: ID={doctor_id}, Name={doctor_name}")
+        return {"message": "Doctor deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"ERROR - Failed to delete doctor: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to delete doctor: {str(e)}")
 
 @app.get("/api/doctor-interactions", response_model=List[schemas.DoctorInteraction])
 def get_doctor_history(
@@ -329,11 +385,13 @@ def get_requests(
         func.count(models.DoctorInteraction.id).label("visit_count")
     ).group_by(models.DoctorInteraction.request_id).subquery()
 
-    # Query requests with doctor name, division, and visit count
+    # Query requests with doctor name, division, territory, region and visit count
     query = db.query(
         models.Request,
         models.Doctor.name.label("doctor_name"),
         models.Doctor.division.label("division"),
+        models.Doctor.territory.label("territory"),
+        models.Doctor.region.label("region"),
         interaction_count_subq.c.visit_count
     ).join(
         models.Doctor, models.Request.doctor_id == models.Doctor.id
@@ -353,10 +411,10 @@ def get_requests(
         query = query.filter(models.Doctor.name.ilike(f"%{search}%"))
 
     if territory:
-        query = query.filter(models.Request.territory == territory)
+        query = query.filter(models.Doctor.territory == territory)
 
     if region:
-        query = query.filter(models.Request.region == region)
+        query = query.filter(models.Doctor.region == region)
 
     if therapy:
         query = query.filter(models.Request.therapy_area == therapy)
@@ -368,13 +426,13 @@ def get_requests(
 
     # Build response manually to ensure all fields are included
     response_data = []
-    for request, doctor_name, division, visit_count in results:
+    for request, doctor_name, division, territory, region, visit_count in results:
         response_data.append({
             "id": request.id,
             "doctor_id": request.doctor_id,
             "doctor_name": doctor_name,
-            "territory": request.territory,
-            "region": request.region,
+            "territory": territory,
+            "region": region,
             "therapy_area": request.therapy_area,
             "brand": request.brand,
             "objective": request.objective,
@@ -424,45 +482,55 @@ def assign_request(
     assign_data: schemas.RequestAssign,
     db: Session = Depends(get_db)
 ):
-    """Assign/Reassign a request to an MSL and log the assignment history"""
-    request = db.query(models.Request).filter(models.Request.id == request_id).first()
-    if not request:
-        raise HTTPException(status_code=404, detail="Request not found")
-    
-    previous_msl = request.assigned_msl
-    new_msl = assign_data.assigned_msl
-    
-    # Only log and update if there\\'s an actual change
-    if previous_msl != new_msl:
-        request.assigned_msl = new_msl
+    """Assign/Reassign a request to an MSL and log the assignment history with transaction safety"""
+    try:
+        request = db.query(models.Request).filter(models.Request.id == request_id).first()
+        if not request:
+            raise HTTPException(status_code=404, detail="Request not found")
         
-        # Auto-update request_status and brand statuses based on assignment
-        if new_msl:
-            request.request_status = "In Progress"
-            request.brand1_status = "In Progress"
-            if request.brand2:
-                request.brand2_status = "In Progress"
-        else:
-            request.request_status = "Pending"
-            request.brand1_status = "Pending"
-            if request.brand2:
-                request.brand2_status = "Pending"
+        previous_msl = request.assigned_msl
+        new_msl = assign_data.assigned_msl
         
-        # Create history log entry
-        log_entry = models.RequestAssignmentLog(
-            request_id=request_id,
-            assigned_by=assign_data.assigned_by,
-            previous_msl=previous_msl,
-            new_msl=new_msl
-        )
-        db.add(log_entry)
-        db.commit()
-        db.refresh(request)
-        
-    return {
-        "message": "Request assigned successfully",
-        "assigned_msl": request.assigned_msl
-    }
+        # Only log and update if there's an actual change
+        if previous_msl != new_msl:
+            request.assigned_msl = new_msl
+            
+            # Auto-update request_status and brand statuses based on assignment
+            if new_msl:
+                request.request_status = "In Progress"
+                request.brand1_status = "In Progress"
+                if request.brand2:
+                    request.brand2_status = "In Progress"
+            else:
+                request.request_status = "Pending"
+                request.brand1_status = "Pending"
+                if request.brand2:
+                    request.brand2_status = "Pending"
+            
+            # Create history log entry
+            log_entry = models.RequestAssignmentLog(
+                request_id=request_id,
+                assigned_by=assign_data.assigned_by,
+                previous_msl=previous_msl,
+                new_msl=new_msl
+            )
+            db.add(log_entry)
+            db.commit()
+            db.refresh(request)
+            print(f"DEBUG - Request {request_id} assigned successfully: {previous_msl} -> {new_msl}")
+            
+        return {
+            "message": "Request assigned successfully",
+            "assigned_msl": request.assigned_msl
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"ERROR - Failed to assign request {request_id}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to assign request: {str(e)}")
 
 @app.put("/api/requests/{request_id}/user-classification")
 def update_request_user_classification(
@@ -470,33 +538,43 @@ def update_request_user_classification(
     user_classification: str = Query(..., description="User classification: potential, non-potential, or default"),
     db: Session = Depends(get_db)
 ):
-    """Update request user classification (potential, non-potential, or default) and sync to doctor profile"""
-    valid_classifications = ["potential", "non-potential", "default"]
-    if user_classification not in valid_classifications:
-        raise HTTPException(status_code=400, detail="Invalid user classification. Must be \\'potential\\', \\'non-potential\\', or \\'default\\'")
-    
-    request = db.query(models.Request).filter(models.Request.id == request_id).first()
-    if not request:
-        raise HTTPException(status_code=404, detail="Request not found")
-    
-    # Update request classification
-    request.user_classification = user_classification
-    
-    # Sync to doctor profile - update the doctor\\'s priority status based on classification
-    doctor = db.query(models.Doctor).filter(models.Doctor.id == request.doctor_id).first()
-    if doctor:
-        if user_classification == "potential":
-            doctor.is_priority_doctor = True
-        elif user_classification == "non-potential":
-            doctor.is_priority_doctor = False
-        # For "default", keep the doctor\\'s current priority status
-    
-    db.commit()
-    return {
-        "message": "User classification updated successfully",
-        "user_classification": user_classification,
-        "doctor_updated": doctor is not None
-    }
+    """Update request user classification (potential, non-potential, or default) and sync to doctor profile with transaction safety"""
+    try:
+        valid_classifications = ["potential", "non-potential", "default"]
+        if user_classification not in valid_classifications:
+            raise HTTPException(status_code=400, detail="Invalid user classification. Must be 'potential', 'non-potential', or 'default'")
+        
+        request = db.query(models.Request).filter(models.Request.id == request_id).first()
+        if not request:
+            raise HTTPException(status_code=404, detail="Request not found")
+        
+        # Update request classification
+        request.user_classification = user_classification
+        
+        # Sync to doctor profile - update the doctor's priority status based on classification
+        doctor = db.query(models.Doctor).filter(models.Doctor.id == request.doctor_id).first()
+        if doctor:
+            if user_classification == "potential":
+                doctor.is_priority_doctor = True
+            elif user_classification == "non-potential":
+                doctor.is_priority_doctor = False
+            # For "default", keep the doctor's current priority status
+        
+        db.commit()
+        print(f"DEBUG - Request {request_id} user classification updated: {user_classification}, Doctor priority updated: {doctor is not None}")
+        return {
+            "message": "User classification updated successfully",
+            "user_classification": user_classification,
+            "doctor_updated": doctor is not None
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"ERROR - Failed to update user classification for request {request_id}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to update user classification: {str(e)}")
 
 @app.put("/api/requests/{request_id}/rx-status")
 def update_rx_status(
@@ -505,29 +583,39 @@ def update_rx_status(
     rx_status_brand2: Optional[str] = Query(None, description="RX status for brand 2: potential, non-potential, default"),
     db: Session = Depends(get_db)
 ):
-    """Update per-brand RX status for a request"""
-    valid_statuses = ["potential", "non-potential", "default"]
-    
-    request = db.query(models.Request).filter(models.Request.id == request_id).first()
-    if not request:
-        raise HTTPException(status_code=404, detail="Request not found")
-    
-    if rx_status_brand1 is not None:
-        if rx_status_brand1 not in valid_statuses:
-            raise HTTPException(status_code=400, detail=f"Invalid rx_status_brand1. Must be one of: {valid_statuses}")
-        request.rx_status_brand1 = rx_status_brand1
-    
-    if rx_status_brand2 is not None:
-        if rx_status_brand2 not in valid_statuses:
-            raise HTTPException(status_code=400, detail=f"Invalid rx_status_brand2. Must be one of: {valid_statuses}")
-        request.rx_status_brand2 = rx_status_brand2
-    
-    db.commit()
-    return {
-        "message": "RX status updated successfully",
-        "rx_status_brand1": request.rx_status_brand1,
-        "rx_status_brand2": request.rx_status_brand2
-    }
+    """Update per-brand RX status for a request with transaction safety"""
+    try:
+        valid_statuses = ["potential", "non-potential", "default"]
+        
+        request = db.query(models.Request).filter(models.Request.id == request_id).first()
+        if not request:
+            raise HTTPException(status_code=404, detail="Request not found")
+        
+        if rx_status_brand1 is not None:
+            if rx_status_brand1 not in valid_statuses:
+                raise HTTPException(status_code=400, detail=f"Invalid rx_status_brand1. Must be one of: {valid_statuses}")
+            request.rx_status_brand1 = rx_status_brand1
+        
+        if rx_status_brand2 is not None:
+            if rx_status_brand2 not in valid_statuses:
+                raise HTTPException(status_code=400, detail=f"Invalid rx_status_brand2. Must be one of: {valid_statuses}")
+            request.rx_status_brand2 = rx_status_brand2
+        
+        db.commit()
+        print(f"DEBUG - Request {request_id} RX status updated: Brand1={request.rx_status_brand1}, Brand2={request.rx_status_brand2}")
+        return {
+            "message": "RX status updated successfully",
+            "rx_status_brand1": request.rx_status_brand1,
+            "rx_status_brand2": request.rx_status_brand2
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"ERROR - Failed to update RX status for request {request_id}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to update RX status: {str(e)}")
 
 # ==================== DOCTOR INTERACTIONS ====================
 
@@ -719,23 +807,17 @@ def get_request_logs(request_id: int, db: Session = Depends(get_db)):
     ).all()
     
     for interaction in interactions:
-        # Get brand names from the new brands relationship
+        # Get brand names from the brands relationship
         brand_names = []
         if interaction.brands:
             brand_names = [b.brand_name for b in interaction.brands if b.brand_name]
-        # Fallback to legacy fields if no brands array
-        if not brand_names:
-            if interaction.brand_discussed:
-                brand_names.append(interaction.brand_discussed)
-            if interaction.brand2_discussed:
-                brand_names.append(interaction.brand2_discussed)
         
         logs.append(schemas.ActivityLog(
             id=interaction.id,
             type="doctor_interaction",
             date=interaction.visit_date,
             title=f"Visit by {interaction.logged_by or 'Unknown'}",
-            details=interaction.summary,
+            details=interaction.objections,
             created_at=interaction.created_at,
             brands=brand_names if brand_names else None,
             logged_by=interaction.logged_by
@@ -788,14 +870,14 @@ def get_monthly_employee_summary(
         for user in users:
             # Get doctor interactions for this user in the specified month
             doctor_interactions = db.query(models.DoctorInteraction).filter(
-                models.DoctorInteraction.logged_by == user.username,
+                models.DoctorInteraction.logged_by == user.Emp_Name,
                 extract("month", models.DoctorInteraction.visit_date) == month,
                 extract("year", models.DoctorInteraction.visit_date) == year
             ).order_by(models.DoctorInteraction.visit_date.desc()).all()
             
             # Get office activities for this user in the specified month
             office_activities = db.query(models.OfficeActivity).filter(
-                models.OfficeActivity.msl_username == user.username,
+                models.OfficeActivity.msl_username == user.Emp_Name,
                 extract("month", models.OfficeActivity.activity_date) == month,
                 extract("year", models.OfficeActivity.activity_date) == year
             ).order_by(models.OfficeActivity.activity_date.desc()).all()
@@ -862,11 +944,8 @@ def get_monthly_employee_summary(
                     id=di.id,
                     doctor_name=di.doctor_name,
                     visit_date=di.visit_date,
-                    topics_discussed=di.topics_discussed,
-                    summary=di.summary,
-                    outcomes=di.outcomes,
-                    brand_discussed=di.brand_discussed,
-                    interest_level=di.interest_level
+                    objections=di.objections,
+                    brands=di.brands
                 ) for di in doctor_interactions
             ]
             
@@ -886,8 +965,8 @@ def get_monthly_employee_summary(
             
             # Create employee summary
             employee_summary = schemas.EmployeeMonthlySummary(
-                employee_id=user.employee_id,
-                employee_name=user.username,
+                employee_id=user.Emp_Code,
+                employee_name=user.Emp_Name,
                 month=month,
                 year=year,
                 month_name=month_name_str,
