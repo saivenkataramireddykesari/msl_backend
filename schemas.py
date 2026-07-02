@@ -58,19 +58,8 @@ class DoctorInteractionBase(BaseModel):
     doctor_name: str
     visit_date: date
     logged_by: Optional[str] = None
-    topics_discussed: Optional[str] = None  # Legacy field
-    summary: Optional[str] = None  # Legacy field
-    outcomes: Optional[str] = None  # Legacy field
-    brand_discussed: Optional[str] = None  # Legacy field
-    brand2_discussed: Optional[str] = None  # Legacy field
-    interest_level: Optional[str] = None  # Legacy field
-    brand2_interest_level: Optional[str] = None  # Legacy field
     objections: Optional[str] = None
-    insights_for_marketing: Optional[str] = None  # Legacy field
-    brand2_topics: Optional[str] = None  # Legacy field
-    brand2_summary: Optional[str] = None  # Legacy field
-    brand2_outcomes: Optional[str] = None  # Legacy field
-    brands: Optional[List[InteractionBrandBase]] = []  # New dynamic brands array
+    brands: Optional[List[InteractionBrandBase]] = []  # Dynamic brands array
 
 class DoctorInteractionCreate(DoctorInteractionBase):
     request_id: int
@@ -123,9 +112,6 @@ class RequestAssign(BaseModel):
 # Request Schemas
 class RequestBase(BaseModel):
     doctor_id: int
-    territory: Optional[str] = None
-    region: Optional[str] = None
-    therapy_area: Optional[str] = None
     brand: Optional[str] = None
     objective: Optional[str] = None
     expected_outcome: Optional[str] = None
@@ -163,10 +149,6 @@ class RequestSummary(BaseModel):
     doctor_id: int
     requested_by: str
     requested_by_role: str
-    territory: Optional[str] = None
-    region: Optional[str] = None
-
-    therapy_area: Optional[str] = None
     brand: Optional[str] = None
     objective: Optional[str] = None
     expected_outcome: Optional[str] = None
@@ -184,22 +166,42 @@ class RequestSummary(BaseModel):
     rx_status_brand2: Optional[str] = None
     created_at: datetime
     doctor_name: Optional[str] = None
+    territory: Optional[str] = None  # From doctor relationship
+    region: Optional[str] = None     # From doctor relationship
+    therapy_area: Optional[str] = None  # From doctor relationship
     
     class Config:
         from_attributes = True
     
-# User Schemas
+# User Schemas - matching actual database table structure
 class UserBase(BaseModel):
-    username: str
-    employee_id: str
-    role: str
+    Emp_Name: Optional[str] = None
+    Emp_Code: Optional[str] = None
+    Role: Optional[str] = None
+    Division_: Optional[str] = None
+    Division: Optional[str] = None
+    Territory: Optional[str] = None
+    HQ: Optional[str] = None
+    Region: Optional[str] = None
+    Zone: Optional[str] = None
+    gender: Optional[str] = None
+    Reporting_Manager: Optional[str] = None
+    Area_Name: Optional[str] = None
+    Reporting_Manager_Code: Optional[str] = None
+    joining_date: Optional[date] = None
+    phone_mobile: Optional[str] = None
+    email1: Optional[str] = None
+    status: Optional[str] = None
+    lastdcrdate: Optional[date] = None
+    DOB: Optional[date] = None
+    terr_joining_date: Optional[date] = None
+    Profile: Optional[str] = None
 
 class UserCreate(UserBase):
-    password: str
+    password: Optional[str] = None
 
 class User(UserBase):
     id: int
-    created_at: datetime
     
     class Config:
         from_attributes = True
@@ -237,12 +239,8 @@ class MonthlySummaryDoctorInteraction(BaseModel):
     id: int
     doctor_name: str
     visit_date: date
-    topics_discussed: Optional[str] = None
-    summary: Optional[str] = None
-    outcomes: Optional[str] = None
-    brand_discussed: Optional[str] = None
-    interest_level: Optional[str] = None
-    brands: List[InteractionBrand] = []  # New dynamic brands
+    objections: Optional[str] = None
+    brands: List[InteractionBrand] = []  # Dynamic brands
     
     class Config:
         from_attributes = True
