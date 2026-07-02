@@ -28,7 +28,7 @@ class Doctor(Base):
     name = Column(String(255), nullable=False)           # Dr_Name
     speciality = Column(String(255), nullable=True)       # Speciality (replaces therapy_area)
     therapy_area = Column(String(255), nullable=True)     # kept for backward compat / grouping
-    is_priority_doctor = Column(Boolean, default=True)    # all seeded doctors are priority
+    is_priority_doctor = Column(Boolean, default=True)    # priority doctor flag
 
     # Fields from Excel
     division = Column(String(255), nullable=True)         # Division
@@ -52,28 +52,25 @@ class Request(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     doctor_id = Column(Integer, ForeignKey("doctors.id"), nullable=False)
-    territory = Column(String(255), nullable=True)
-    region = Column(String(255), nullable=True)
     requested_by = Column(String(100), nullable=False)
     requested_by_role = Column(String(50), nullable=False)
-    therapy_area = Column(String(255), nullable=True)
-    brand = Column(String(255), nullable=True)  # Reverted to 'brand'
-    objective = Column(Text, nullable=True)     # Reverted to 'objective'
-    expected_outcome = Column(Text, nullable=True) # Reverted
-    priority = Column(String(50), nullable=True)   # Reverted
-    notes = Column(Text, nullable=True)         # Reverted
-    brand2 = Column(String(255), nullable=True)  # Keep 'brand2'
-    objective2 = Column(Text, nullable=True)     # New field
-    expected_outcome2 = Column(Text, nullable=True) # New field
-    priority2 = Column(String(50), nullable=True)   # New field
-    notes2 = Column(Text, nullable=True)         # New field
+    brand = Column(String(255), nullable=True)
+    objective = Column(Text, nullable=True)
+    expected_outcome = Column(Text, nullable=True)
+    priority = Column(String(50), nullable=True)
+    notes = Column(Text, nullable=True)
+    brand2 = Column(String(255), nullable=True)
+    objective2 = Column(Text, nullable=True)
+    expected_outcome2 = Column(Text, nullable=True)
+    priority2 = Column(String(50), nullable=True)
+    notes2 = Column(Text, nullable=True)
     user_classification = Column(String(50), default="default")
     assigned_msl = Column(String(255), nullable=True)
-    request_status = Column(String(50), default="Pending", nullable=False)  # Pending, In Progress, Completed
+    request_status = Column(String(50), default="Pending", nullable=False)
     
     # Per-brand RX status tracking
-    rx_status_brand1 = Column(String(50), nullable=True)  # RX status for brand 1 (e.g., Potential, Non-Potential, Default)
-    rx_status_brand2 = Column(String(50), nullable=True)  # RX status for brand 2 (null if no brand2)
+    rx_status_brand1 = Column(String(50), nullable=True)
+    rx_status_brand2 = Column(String(50), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
@@ -89,19 +86,7 @@ class DoctorInteraction(Base):
     logged_by = Column(String(255), nullable=True)  # MSL username who logged this visit
     doctor_name = Column(String(255), nullable=False)
     visit_date = Column(Date, nullable=False)
-    topics_discussed = Column(Text, nullable=True)  # Legacy: kept for backward compatibility
-    summary = Column(Text, nullable=True)  # Legacy: kept for backward compatibility
-    outcomes = Column(String(255), nullable=True)  # Legacy: kept for backward compatibility
-    brand_discussed = Column(String(255), nullable=True)  # Legacy: kept for backward compatibility
-    brand2_discussed = Column(String(255), nullable=True)  # Legacy: kept for backward compatibility
-    interest_level = Column(String(100), nullable=True)  # Legacy: kept for backward compatibility
-    brand2_interest_level = Column(String(100), nullable=True)  # Legacy: kept for backward compatibility
     objections = Column(Text, nullable=True)
-    insights_for_marketing = Column(Text, nullable=True)  # Legacy: kept for backward compatibility
-    # Per-brand topics and summaries (Legacy)
-    brand2_topics = Column(Text, nullable=True)  # Legacy: kept for backward compatibility
-    brand2_summary = Column(Text, nullable=True)  # Legacy: kept for backward compatibility
-    brand2_outcomes = Column(String(255), nullable=True)  # Legacy: kept for backward compatibility
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
@@ -139,11 +124,30 @@ class User(Base):
     __tablename__ = "users"
     
     id = Column(Integer, primary_key=True, index=True)
-    username = Column(String(255), nullable=False)
-    password = Column(String(255), nullable=False)
-    employee_id = Column(String(50), unique=True, nullable=False)
-    role = Column(String(100), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    Division_ = Column(String(100), nullable=True)
+    Division = Column(String(100), nullable=True)
+    Territory = Column(String(100), nullable=True)
+    HQ = Column(String(100), nullable=True)
+    Region = Column(String(100), nullable=True)
+    Zone = Column(String(100), nullable=True)
+    Emp_Code = Column(String(50), nullable=True)
+    Emp_Name = Column(String(255), nullable=True)
+    gender = Column(String(20), nullable=True)
+    Reporting_Manager = Column(String(255), nullable=True)
+    Area_Name = Column(String(255), nullable=True)
+    Reporting_Manager_Code = Column(String(50), nullable=True)
+    joining_date = Column(Date, nullable=True)
+    Role = Column(String(100), nullable=True)
+    phone_mobile = Column(String(20), nullable=True)
+    email1 = Column(String(255), nullable=True)
+    status = Column(String(50), nullable=True)
+    lastdcrdate = Column(Date, nullable=True)
+    DOB = Column(Date, nullable=True)
+    terr_joining_date = Column(Date, nullable=True)
+    Profile = Column(String(255), nullable=True)
+    
+    # Additional fields for authentication (not in original table, but needed for app)
+    password = Column(String(255), nullable=True)
 
 # Configuration Models for Dynamic Data
 class Brand(Base):
