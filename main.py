@@ -21,7 +21,6 @@ app.add_middleware(
         "http://localhost:5173",
         "http://localhost:3000",
         "https://msl-frontend.netlify.app",
-        "https://*.netlify.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
