@@ -1,33 +1,41 @@
+import sys
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Add the project root to the sys.path to allow absolute imports when running main.py directly
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import extract, func
 from typing import List, Optional
 from datetime import date, datetime
 from calendar import month_name
 import os
-import models, schemas, database
-from database import get_db, engine
+from MSL_BACKEND import models, schemas, database
+from MSL_BACKEND.database import get_db, engine
 
-# Create tables
+# Do not drop/create tables to preserve existing data
+# models.Base.metadata.drop_all(bind=engine)
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="MSL Engagement Management System")
 
 # CORS middleware — allow all origins for dev compatibility
+# Load CORS_ORIGINS from environment, fallback to a default list if not set
+CORS_ORIGINS_STR = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000,https://msl-frontend.netlify.app")
+CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_STR.split(',')]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "https://msl-frontend.netlify.app",
-    ],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
 
 @app.post("/api/login", response_model=schemas.LoginResponse)
 def login(login_data: schemas.LoginRequest, db: Session = Depends(get_db)):
@@ -56,7 +64,10 @@ def login(login_data: schemas.LoginRequest, db: Session = Depends(get_db)):
         "username": user.Emp_Name,
         "role": user.Role,
         "employee_id": user.Emp_Code,
-        "message": "Login successful"
+        "message": "Login successful",
+        "bl_territory": user.Territory if user.Role == "BL" else None,
+        "bl_region": user.Region if user.Role == "BL" else None,
+        "division": user.Division
     }
 
 @app.post("/api/login-by-employee-id", response_model=schemas.LoginResponse)
@@ -83,7 +94,10 @@ def login_by_employee_id(login_data: schemas.UrlLoginRequest, db: Session = Depe
         "username": user.Emp_Name,
         "role": user.Role,
         "employee_id": user.Emp_Code,
-        "message": "Login successful"
+        "message": "Login successful",
+        "bl_territory": user.Territory if user.Role == "BL" else None,
+        "bl_region": user.Region if user.Role == "BL" else None,
+        "division": user.Division
     }
 
 @app.get("/api/users", response_model=List[schemas.User])
@@ -106,6 +120,33 @@ def get_msl_users(db: Session = Depends(get_db)):
         }
         for u in users
     ]
+
+# ==================== BRANDS ====================
+@app.post("/api/brands", response_model=schemas.Brand)
+def create_brand(brand: schemas.BrandCreate, db: Session = Depends(get_db)):
+    db_brand = models.Brand(**brand.model_dump())
+    db.add(db_brand)
+    db.commit()
+    db.refresh(db_brand)
+    return db_brand
+
+@app.get("/api/brands")
+def get_brands(
+    division: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    print("Division received:", division)
+
+    query = db.query(models.Brand)
+
+    if division:
+        print("Filtering by:", division)
+        query = query.filter(models.Brand.divisionname == division)
+
+    brands = query.all()
+
+    print("Returned:", len(brands))
+    return brands
 
 # ==================== DOCTORS ====================
 
@@ -148,16 +189,27 @@ def create_doctor(doctor: schemas.DoctorCreate, db: Session = Depends(get_db)):
 
 @app.get("/api/doctors/regions")
 def get_regions_by_bl_location(
-    bl_territory: Optional[str] = Query(None, description="Filter by BL territory"),
+    current_user_employee_id: Optional[str] = Query(None, description="Employee ID of the current user"),
+    current_user_role: Optional[str] = Query(None, description="Role of the current user"),
     db: Session = Depends(get_db)
 ):
-    """Get unique regions based on BL location (bl_territory)"""
+    """Get unique regions. If the user is a BL, filter by their assigned region."""
     query = db.query(models.Doctor.region).distinct()
+
+    if current_user_role == "BL" and current_user_employee_id:
+        # Fetch the BL user's assigned region
+        bl_user = db.query(models.User).filter(models.User.Emp_Code == current_user_employee_id).first()
+        if bl_user and bl_user.Region:
+            print(f"DEBUG: BL user {current_user_employee_id} found with region: '{bl_user.Region}' and role: '{bl_user.Role}'")
+            query = query.filter(models.Doctor.region == bl_user.Region)
+        else:
+            print(f"DEBUG: BL user {current_user_employee_id} not found or no region assigned.")
+            # If BL user not found or has no region, return no regions for safety
+            return []
     
-    if bl_territory:
-        query = query.filter(models.Doctor.bl_territory == bl_territory)
-    
-    regions = [r[0] for r in query.all() if r[0]]
+    raw_regions = query.all()
+    regions = [r[0] for r in raw_regions if r[0]]
+    print(f"DEBUG: Regions query results after filtering: {regions}")
     return sorted(regions)
 
 @app.get("/api/doctors/territories")
@@ -174,7 +226,9 @@ def get_territories_by_region(
     if bl_territory:
         query = query.filter(models.Doctor.bl_territory == bl_territory)
     
-    territories = [t[0] for t in query.all() if t[0]]
+    raw_territories = query.all()
+    print(f"DEBUG: Raw territories from DB for region {region}: {raw_territories}")
+    territories = [t[0] for t in raw_territories if t[0]]
     return sorted(territories)
 
 @app.get("/api/doctors/patches")
@@ -221,6 +275,42 @@ def get_doctors_by_location(
     if bl_territory:
         query = query.filter(models.Doctor.bl_territory == bl_territory)
     
+    doctors = query.order_by(models.Doctor.name).all()
+    return doctors
+
+@app.get("/api/doctors/search", response_model=List[schemas.Doctor])
+def search_doctors(
+    search: str = Query("", description="Search term for doctor name or speciality"),
+    region: Optional[str] = Query(None, description="Filter by region"),
+    territory: Optional[str] = Query(None, description="Filter by territory"),
+    patch: Optional[str] = Query(None, description="Filter by patch"),
+    bl_territory: Optional[str] = Query(None, description="Filter by BL territory"),
+    db: Session = Depends(get_db)
+):
+    """
+    Search for doctors by name or speciality, filtered by region, territory, patch, and BL territory.
+    """
+    query = db.query(models.Doctor)
+
+    if region:
+        query = query.filter(models.Doctor.region == region)
+
+    if territory:
+        query = query.filter(models.Doctor.territory == territory)
+
+    if patch:
+        query = query.filter(models.Doctor.patch == patch)
+
+    if bl_territory:
+        query = query.filter(models.Doctor.bl_territory == bl_territory)
+    
+    if search:
+        search_pattern = f"%{search}%"
+        query = query.filter(
+            (models.Doctor.name.ilike(search_pattern)) |
+            (models.Doctor.speciality.ilike(search_pattern))
+        )
+
     doctors = query.order_by(models.Doctor.name).all()
     return doctors
 
@@ -318,8 +408,6 @@ def create_request(request: schemas.RequestCreate, db: Session = Depends(get_db)
     # Debug: Log incoming request data
     request_data = request.model_dump()
     print(f"DEBUG - Received request data: {request_data}")
-    print(f"DEBUG - Territory from request: \'{request.territory}\'")
-    print(f"DEBUG - Region from request: \'{request.region}\'")
     print(f"DEBUG - Doctor ID: {request.doctor_id}")
     
     # Verify doctor exists
@@ -334,11 +422,11 @@ def create_request(request: schemas.RequestCreate, db: Session = Depends(get_db)
         # Create request with explicit field assignment
         db_request = models.Request(
             doctor_id=request.doctor_id,
-            territory=request.territory,
-            region=request.region,
+            territory=doctor.territory,
+            region=doctor.region,
             requested_by=request.requested_by,
             requested_by_role=request.requested_by_role,
-            therapy_area=request.therapy_area,
+            therapy_area=doctor.therapy_area,
             brand=request.brand,             # Reverted
             objective=request.objective,     # Reverted
             expected_outcome=request.expected_outcome, # Reverted
@@ -673,6 +761,30 @@ def get_interactions_by_doctor(doctor_name: str, db: Session = Depends(get_db)):
         models.DoctorInteraction.doctor_name == doctor_name
     ).order_by(models.DoctorInteraction.visit_date.desc()).all()
     return interactions
+
+@app.get("/api/doctors/all_details")
+def get_all_doctors_details(db: Session = Depends(get_db)):
+    """Temporarily get all doctor details for debugging."""
+    doctors = db.query(models.Doctor).all()
+    return [{
+        "id": doctor.id,
+        "name": doctor.name,
+        "speciality": doctor.speciality,
+        "therapy_area": doctor.therapy_area,
+        "is_priority_doctor": doctor.is_priority_doctor,
+        "division": doctor.division,
+        "territory": doctor.territory,
+        "emp_code": doctor.emp_code,
+        "emp_name": doctor.emp_name,
+        "region": doctor.region,
+        "patch": doctor.patch,
+        "doctor_id_ext": doctor.doctor_id_ext,
+        "uid_number": doctor.uid_number,
+        "bm_territory": doctor.bm_territory,
+        "bl_territory": doctor.bl_territory,
+        "bh_territory": doctor.bh_territory,
+        "sbuh_territory": doctor.sbuh_territory,
+    } for doctor in doctors]
 
 @app.get("/api/doctor-interactions/by-date-user", response_model=List[schemas.DoctorInteraction])
 def get_interactions_by_date_user(

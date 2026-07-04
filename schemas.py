@@ -219,6 +219,9 @@ class LoginResponse(BaseModel):
     role: str
     employee_id: str
     message: str
+    bl_territory: Optional[str] = None
+    bl_region: Optional[str] = None
+    division: Optional[str] = None
 
 # Activity Log Response
 class ActivityLog(BaseModel):
@@ -300,5 +303,19 @@ class MonthlyReportResponse(BaseModel):
     total_office_activities_all: int
     total_hours_worked_all: float
     
+    class Config:
+        from_attributes = True
+
+# Updated Brand Schemas
+class BrandBase(BaseModel):
+    divisionname: str
+    brandname: str
+
+class BrandCreate(BrandBase):
+    pass
+
+class Brand(BrandBase):
+    id: int
+
     class Config:
         from_attributes = True

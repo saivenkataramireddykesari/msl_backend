@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, Float, String, DateTime, Text, Boolean, ForeignKey, Date
 from sqlalchemy.orm import relationship
-from database import Base
+from .database import Base
 from datetime import datetime
 
 class InteractionBrand(Base):
@@ -43,7 +43,7 @@ class Doctor(Base):
     bl_territory = Column(String(255), nullable=True)     # BL_Territory
     bh_territory = Column(String(255), nullable=True)     # BH_Territory
     sbuh_territory = Column(String(255), nullable=True)   # SBUH_Territory
-
+    
     # Relationship
     requests = relationship("Request", back_populates="doctor")
 
@@ -67,10 +67,14 @@ class Request(Base):
     user_classification = Column(String(50), default="default")
     assigned_msl = Column(String(255), nullable=True)
     request_status = Column(String(50), default="Pending", nullable=False)
+    territory = Column(String(255), nullable=True)  # Add territory field
+    region = Column(String(255), nullable=True)     # Add region field
+    therapy_area = Column(String(255), nullable=True) # Add therapy_area field
     
     # Per-brand RX status tracking
     rx_status_brand1 = Column(String(50), nullable=True)
     rx_status_brand2 = Column(String(50), nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
@@ -150,14 +154,24 @@ class User(Base):
     password = Column(String(255), nullable=True)
 
 # Configuration Models for Dynamic Data
-class Brand(Base):
-    """Stores available brands for selection"""
-    __tablename__ = "brands"
+class Division(Base):
+    """Stores available divisions for selection"""
+    __tablename__ = "divisions"
     
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False, unique=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    
+
+
+class Brand(Base):
+    """Stores available brands for selection"""
+    __tablename__ = "brands"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    divisionname = Column(String(100), nullable=False)
+    brandname = Column(String(255), nullable=False)
 
 class Priority(Base):
     """Stores available priority levels"""
