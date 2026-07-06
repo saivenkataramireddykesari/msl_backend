@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, Float, String, DateTime, Text, Boolean, ForeignKey, Date
 from sqlalchemy.orm import relationship
-from .database import Base
+from database import Base
 from datetime import datetime
 
 class InteractionBrand(Base):

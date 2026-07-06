@@ -1,11 +1,7 @@
-import sys
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
-
-# Add the project root to the sys.path to allow absolute imports when running main.py directly
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,8 +11,10 @@ from typing import List, Optional
 from datetime import date, datetime
 from calendar import month_name
 import os
-from MSL_BACKEND import models, schemas, database
-from MSL_BACKEND.database import get_db, engine
+import models
+import schemas
+import database
+from database import get_db, engine
 
 # Do not drop/create tables to preserve existing data
 # models.Base.metadata.drop_all(bind=engine)
