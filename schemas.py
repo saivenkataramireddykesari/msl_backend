@@ -306,6 +306,35 @@ class MonthlyReportResponse(BaseModel):
     class Config:
         from_attributes = True
 
+# Daily Report Schemas
+class EmployeeDailySummary(BaseModel):
+    employee_id: str
+    employee_name: str
+    report_date: date
+    day_name: str
+    
+    total_doctor_visits: int
+    unique_doctors_visited: int
+    doctor_interactions: List[MonthlySummaryDoctorInteraction]
+    
+    total_office_activities: int
+    total_hours_worked: float
+    office_activities: List[MonthlySummaryOfficeActivity]
+    
+    work_type: Optional[str] = None # Overall work type for the day
+    
+    class Config:
+        from_attributes = True
+
+class DailyReportResponse(BaseModel):
+    report_date: date
+    report_day_name: str
+    generated_at: datetime
+    employees: List[EmployeeDailySummary]
+    
+    class Config:
+        from_attributes = True
+
 # Updated Brand Schemas
 class BrandBase(BaseModel):
     divisionname: str

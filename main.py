@@ -939,6 +939,28 @@ def get_request_logs(request_id: int, db: Session = Depends(get_db)):
     
     return logs
 
+# ==================== DEBUG: check logged_by values ====================
+
+@app.get("/api/reports/debug-names")
+def debug_employee_names(
+    employee_id: str = Query(..., description="Employee ID to check"),
+    db: Session = Depends(get_db)
+):
+    """Debug: compare Emp_Name in Users table vs logged_by in DoctorInteraction and msl_username in OfficeActivity"""
+    user = db.query(models.User).filter(models.User.Emp_Code == employee_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User with Emp_Code={employee_id} not found")
+
+    sample_interactions = db.query(models.DoctorInteraction.logged_by).distinct().limit(20).all()
+    sample_activities = db.query(models.OfficeActivity.msl_username).distinct().limit(20).all()
+
+    return {
+        "user_Emp_Code": user.Emp_Code,
+        "user_Emp_Name": user.Emp_Name,
+        "distinct_logged_by_values_sample": [r[0] for r in sample_interactions],
+        "distinct_msl_username_values_sample": [r[0] for r in sample_activities],
+    }
+
 # ==================== MONTHLY EMPLOYEE SUMMARY REPORT ====================
 
 @app.get("/api/reports/monthly-summary", response_model=schemas.MonthlyReportResponse)
@@ -961,7 +983,7 @@ def get_monthly_employee_summary(
         # Get all users or filter by specific employee IDs
         users_query = db.query(models.User)
         if target_employee_ids:
-            users_query = users_query.filter(models.User.employee_id.in_(target_employee_ids))
+            users_query = users_query.filter(models.User.Emp_Code.in_(target_employee_ids))
         
         users = users_query.all()
         
@@ -1121,6 +1143,120 @@ def get_monthly_employee_summary(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to generate report: {str(e)}")
+
+@app.get("/api/reports/daily-summary", response_model=schemas.DailyReportResponse)
+def get_daily_employee_summary(
+    report_date: date = Query(..., description="Date for the daily report (YYYY-MM-DD)"),
+    employee_ids: Optional[str] = Query(None, description="Comma-separated employee IDs (e.g., 'E9250,E5057')"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get daily working summary report for specified employees.
+    If employee_ids is not provided, returns report for all employees.
+    """
+    try:
+        # Parse employee IDs if provided
+        target_employee_ids = []
+        if employee_ids:
+            target_employee_ids = [eid.strip() for eid in employee_ids.split(",")]
+        
+        # Get all users or filter by specific employee IDs
+        users_query = db.query(models.User)
+        if target_employee_ids:
+            users_query = users_query.filter(models.User.Emp_Code.in_(target_employee_ids))
+        
+        users = users_query.all()
+        
+        if not users:
+            raise HTTPException(status_code=404, detail="No employees found with the specified IDs")
+
+        employee_summaries = []
+        
+        for user in users:
+            # Get doctor interactions for this user on the specified date
+            doctor_interactions = db.query(models.DoctorInteraction).filter(
+                models.DoctorInteraction.logged_by == user.Emp_Name,
+                models.DoctorInteraction.visit_date == report_date
+            ).order_by(models.DoctorInteraction.visit_date.desc()).all()
+            
+            # Get office activities for this user on the specified date
+            office_activities = db.query(models.OfficeActivity).filter(
+                models.OfficeActivity.msl_username == user.Emp_Name,
+                models.OfficeActivity.activity_date == report_date
+            ).order_by(models.OfficeActivity.activity_date.desc()).all()
+
+            # Calculate unique doctors visited
+            unique_doctors = set()
+            for interaction in doctor_interactions:
+                unique_doctors.add(interaction.doctor_name)
+
+            # Calculate total hours worked from office activities
+            total_hours = sum(a.hours_worked or 0.0 for a in office_activities)
+
+            # Determine overall work type for the day
+            calculated_work_type = "nothing done"
+            if total_hours > 0.0 and len(doctor_interactions) > 0:
+                calculated_work_type = "both done"
+            elif total_hours > 0.0:
+                calculated_work_type = "worked at office"
+            elif len(doctor_interactions) > 0:
+                calculated_work_type = "call supported"
+
+            # Format doctor interactions for response
+            formatted_interactions = [
+                schemas.MonthlySummaryDoctorInteraction(
+                    id=di.id,
+                    doctor_name=di.doctor_name,
+                    visit_date=di.visit_date,
+                    objections=di.objections,
+                    brands=di.brands
+                ) for di in doctor_interactions
+            ]
+            
+            # Format office activities for response
+            formatted_activities = [
+                schemas.MonthlySummaryOfficeActivity(
+                    id=oa.id,
+                    activity_date=oa.activity_date,
+                    activity_category=oa.activity_category,
+                    summary=oa.summary,
+                    linked_outputs=oa.linked_outputs,
+                    work_type=oa.work_type,
+                    hours_worked=oa.hours_worked,
+                    doctors_visited=oa.doctors_visited
+                ) for oa in office_activities
+            ]
+
+            employee_summary = schemas.EmployeeDailySummary(
+                employee_id=user.Emp_Code,
+                employee_name=user.Emp_Name,
+                report_date=report_date,
+                day_name=report_date.strftime("%A"),  # Full weekday name
+                total_doctor_visits=len(doctor_interactions),
+                unique_doctors_visited=len(unique_doctors),
+                doctor_interactions=formatted_interactions,
+                total_office_activities=len(office_activities),
+                total_hours_worked=round(total_hours, 2),
+                office_activities=formatted_activities,
+                work_type=calculated_work_type
+            )
+            employee_summaries.append(employee_summary)
+
+        report = schemas.DailyReportResponse(
+            report_date=report_date,
+            report_day_name=report_date.strftime("%A"),
+            generated_at=datetime.utcnow(),
+            employees=employee_summaries
+        )
+        return report
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERROR - Failed to generate daily report: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate daily report: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
