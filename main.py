@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import extract, func
@@ -15,6 +15,7 @@ import models
 import schemas
 import database
 from database import get_db, engine
+from constants import REQUEST_CREATION_ROLES
 
 # Do not drop/create tables to preserve existing data
 # models.Base.metadata.drop_all(bind=engine)
@@ -64,7 +65,7 @@ def login(login_data: schemas.LoginRequest, db: Session = Depends(get_db)):
         "employee_id": user.Emp_Code,
         "message": "Login successful",
         "bl_territory": user.Territory if user.Role == "BL" else None,
-        "bl_region": user.Region if user.Role == "BL" else None,
+        "bl_region": user.Region if user.Role in ["BL", "BM"] else None,
         "division": user.Division
     }
 
@@ -94,7 +95,7 @@ def login_by_employee_id(login_data: schemas.UrlLoginRequest, db: Session = Depe
         "employee_id": user.Emp_Code,
         "message": "Login successful",
         "bl_territory": user.Territory if user.Role == "BL" else None,
-        "bl_region": user.Region if user.Role == "BL" else None,
+        "bl_region": user.Region if user.Role in ["BL", "BM"] else None,
         "division": user.Division
     }
 
@@ -192,18 +193,20 @@ def get_regions_by_bl_location(
     db: Session = Depends(get_db)
 ):
     """Get unique regions. If the user is a BL, filter by their assigned region."""
-    query = db.query(models.Doctor.region).distinct()
-
-    if current_user_role == "BL" and current_user_employee_id:
-        # Fetch the BL user's assigned region
-        bl_user = db.query(models.User).filter(models.User.Emp_Code == current_user_employee_id).first()
-        if bl_user and bl_user.Region:
-            print(f"DEBUG: BL user {current_user_employee_id} found with region: '{bl_user.Region}' and role: '{bl_user.Role}'")
-            query = query.filter(models.Doctor.region == bl_user.Region)
+    all_regions_query = db.query(models.Doctor.region).distinct()
+    
+    if current_user_role in ["BL", "BM"] and current_user_employee_id:
+        # Fetch the user's assigned region
+        current_user = db.query(models.User).filter(models.User.Emp_Code == current_user_employee_id).first()
+        if current_user and current_user.Region:
+            print(f"DEBUG: User {current_user_employee_id} found with region: '{current_user.Region}' and role: '{current_user.Role}'")
+            query = all_regions_query.filter(models.Doctor.region == current_user.Region)
         else:
-            print(f"DEBUG: BL user {current_user_employee_id} not found or no region assigned.")
-            # If BL user not found or has no region, return no regions for safety
-            return []
+            print(f"DEBUG: User {current_user_employee_id} not found or no region assigned. Returning all regions.")
+            query = all_regions_query
+    else:
+        print(f"DEBUG: Not a BL/BM user or no employee ID provided. Returning all regions. Role: {current_user_role}, ID: {current_user_employee_id}")
+        query = all_regions_query
     
     raw_regions = query.all()
     regions = [r[0] for r in raw_regions if r[0]]
@@ -213,7 +216,8 @@ def get_regions_by_bl_location(
 @app.get("/api/doctors/territories")
 def get_territories_by_region(
     region: str = Query(..., description="Region to filter by"),
-    bl_territory: Optional[str] = Query(None, description="Optional BL territory filter"),
+    current_user_employee_id: Optional[str] = Query(None, description="Employee ID of the current user"),
+    current_user_role: Optional[str] = Query(None, description="Role of the current user"),
     db: Session = Depends(get_db)
 ):
     """Get unique territories based on selected region and optional BL location"""
@@ -221,9 +225,11 @@ def get_territories_by_region(
         models.Doctor.region == region
     ).distinct()
     
-    if bl_territory:
-        query = query.filter(models.Doctor.bl_territory == bl_territory)
-    
+    if current_user_role == "BL" and current_user_employee_id:
+        bl_user = db.query(models.User).filter(models.User.Emp_Code == current_user_employee_id).first()
+        if bl_user and bl_user.Territory:
+            query = query.filter(models.Doctor.territory == bl_user.Territory)
+
     raw_territories = query.all()
     print(f"DEBUG: Raw territories from DB for region {region}: {raw_territories}")
     territories = [t[0] for t in raw_territories if t[0]]
@@ -233,7 +239,8 @@ def get_territories_by_region(
 def get_patches_by_territory(
     territory: str = Query(..., description="Territory to filter by"),
     region: Optional[str] = Query(None, description="Optional region filter"),
-    bl_territory: Optional[str] = Query(None, description="Optional BL territory filter"),
+    current_user_employee_id: Optional[str] = Query(None, description="Employee ID of the current user"),
+    current_user_role: Optional[str] = Query(None, description="Role of the current user"),
     db: Session = Depends(get_db)
 ):
     """Get unique patches based on selected territory, region and optional BL location"""
@@ -244,9 +251,13 @@ def get_patches_by_territory(
     if region:
         query = query.filter(models.Doctor.region == region)
     
-    if bl_territory:
-        query = query.filter(models.Doctor.bl_territory == bl_territory)
-    
+    if current_user_role == "BL" and current_user_employee_id:
+        bl_user = db.query(models.User).filter(models.User.Emp_Code == current_user_employee_id).first()
+        if bl_user and bl_user.Territory:
+            # Assuming BL users have a single territory defined for filtering patches
+            # This might need refinement based on exact hierarchy structure
+            query = query.filter(models.Doctor.bl_territory == bl_user.Territory)
+
     patches = [p[0] for p in query.all() if p[0]]
     return sorted(patches)
 
@@ -398,9 +409,16 @@ def get_doctor_history(
 
     return interactions
 
-# ==================== REQUESTS ====================
+ # ==================== REQUESTS ====================
 
-@app.post("/api/requests", response_model=schemas.Request)
+def verify_request_creation_permission(request: schemas.RequestCreate):
+    if request.requested_by_role not in REQUEST_CREATION_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to raise requests."
+        )
+
+@app.post("/api/requests", response_model=schemas.Request, dependencies=[Depends(verify_request_creation_permission)])
 def create_request(request: schemas.RequestCreate, db: Session = Depends(get_db)):
     """Create a new MSL engagement request"""
     # Debug: Log incoming request data
@@ -999,19 +1017,25 @@ def get_monthly_employee_summary(
         
         # Process each employee
         for user in users:
+            print(f"DEBUG: Processing report for employee {user.Emp_Name} (ID: {user.Emp_Code})")
+
             # Get doctor interactions for this user in the specified month
+            print(f"DEBUG: Querying doctor interactions for {user.Emp_Name} (Month: {month}, Year: {year})")
             doctor_interactions = db.query(models.DoctorInteraction).filter(
                 models.DoctorInteraction.logged_by == user.Emp_Name,
                 extract("month", models.DoctorInteraction.visit_date) == month,
                 extract("year", models.DoctorInteraction.visit_date) == year
-            ).order_by(models.DoctorInteraction.visit_date.desc()).all()
+            ).options(joinedload(models.DoctorInteraction.brands)).order_by(models.DoctorInteraction.visit_date.desc()).all()
+            print(f"DEBUG: Found {len(doctor_interactions)} doctor interactions for {user.Emp_Name}")
             
             # Get office activities for this user in the specified month
+            print(f"DEBUG: Querying office activities for {user.Emp_Name} (Month: {month}, Year: {year})")
             office_activities = db.query(models.OfficeActivity).filter(
                 models.OfficeActivity.msl_username == user.Emp_Name,
                 extract("month", models.OfficeActivity.activity_date) == month,
                 extract("year", models.OfficeActivity.activity_date) == year
             ).order_by(models.OfficeActivity.activity_date.desc()).all()
+            print(f"DEBUG: Found {len(office_activities)} office activities for {user.Emp_Name}")
             
             # Calculate unique doctors visited
             unique_doctors = set()
