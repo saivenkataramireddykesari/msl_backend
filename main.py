@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+from sqlalchemy import or_
 
 load_dotenv()
 
@@ -16,12 +17,13 @@ import schemas
 import database
 from database import get_db, engine
 from constants import REQUEST_CREATION_ROLES
+from services.hierarchy_service import HierarchyService
 
 # Do not drop/create tables to preserve existing data
 # models.Base.metadata.drop_all(bind=engine)
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="MSL Engagement Management System")
+app = FastAPI(title="Scientific Officer Management System")
 
 # CORS middleware — allow all origins for dev compatibility
 # Load CORS_ORIGINS from environment, fallback to a default list if not set
@@ -185,6 +187,65 @@ def create_doctor(doctor: schemas.DoctorCreate, db: Session = Depends(get_db)):
 # NOTE: These routes MUST be defined BEFORE the /api/doctors/{doctor_id} route
 # because FastAPI matches routes in order and {doctor_id} would catch "regions", etc.
 
+@app.get("/api/new-request/access-data")
+def get_access_data(
+    current_user_employee_id: str = Query(..., description="Employee ID of the current logged in user"),
+    db: Session = Depends(get_db)
+):
+    """ Returns all dynamically filtered regions, territories, patches, and doctors based on the organizational reporting hierarchy."""
+    hierarchy_service = HierarchyService(db)
+    print("HierarchyService initialized") # Added line
+    
+    # Fetch user details for initial logging
+    current_user = db.query(models.User).filter(
+        func.upper(func.trim(models.User.Emp_Code)) == current_user_employee_id.strip().upper()
+    ).first()
+
+    # Add requested debug logs
+    print(f"DEBUG ACCESS: Employee: {current_user.Emp_Name if current_user else 'N/A'}")
+    print(f"DEBUG ACCESS: Role: {current_user.Role if current_user else 'N/A'}")
+    print(f"DEBUG ACCESS: Division: {current_user.Division if current_user else 'N/A'}")
+
+    # Get all accessible data from the hierarchy service
+    accessible_employees_raw = hierarchy_service.get_all_accessible_employees(current_user_employee_id)
+    accessible_territories_raw = hierarchy_service.get_all_accessible_territories(current_user_employee_id)
+    print(f"DEBUG ACCESS: Accessible territories (from hierarchy): {accessible_territories_raw}")
+    
+    regions = hierarchy_service.get_accessible_regions(current_user_employee_id)
+    territories = hierarchy_service.get_accessible_territories_for_dropdown(current_user_employee_id)
+    # No territory is selected during initial page load.
+    # Patches will be loaded after the user selects a territory.
+    patches = []
+
+    print("DEBUG (main.py): No territory selected, patches initialized as []")
+    doctors = hierarchy_service.get_accessible_doctors(current_user_employee_id)
+    
+    # We can just return them as dictionaries or use the schema implicitly if we return the models.
+    # To keep payload small, return limited doctor info
+    doctors_data = [
+        {
+            "id": d.id,
+            "name": d.name,
+            "speciality": d.speciality,
+            "region": d.region,
+            "territory": d.territory,
+            "bm_territory": d.bm_territory,
+            "bl_territory": d.bl_territory,
+            "bh_territory": d.bh_territory,
+            "sbuh_territory": d.sbuh_territory,
+            "patch": d.patch,
+            "is_priority_doctor": d.is_priority_doctor
+        } for d in doctors
+    ]
+    
+    response_payload = {
+        "regions": regions,
+        "territories": territories,
+        "patches": patches,
+        "doctors": doctors_data
+    }
+    print(f"DEBUG (Step 10): API Response: {response_payload}")
+    return response_payload
 
 @app.get("/api/doctors/regions")
 def get_regions_by_bl_location(
@@ -237,54 +298,254 @@ def get_territories_by_region(
 
 @app.get("/api/doctors/patches")
 def get_patches_by_territory(
-    territory: str = Query(..., description="Territory to filter by"),
-    region: Optional[str] = Query(None, description="Optional region filter"),
-    current_user_employee_id: Optional[str] = Query(None, description="Employee ID of the current user"),
-    current_user_role: Optional[str] = Query(None, description="Role of the current user"),
+    territory: str = Query(..., description="Selected territory"),
+    region: Optional[str] = Query(None, description="Selected region"),
+    current_user_employee_id: Optional[str] = Query(None),
+    current_user_role: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
-    """Get unique patches based on selected territory, region and optional BL location"""
-    query = db.query(models.Doctor.patch).filter(
-        models.Doctor.territory == territory
-    ).distinct()
-    
-    if region:
-        query = query.filter(models.Doctor.region == region)
-    
-    if current_user_role == "BL" and current_user_employee_id:
-        bl_user = db.query(models.User).filter(models.User.Emp_Code == current_user_employee_id).first()
-        if bl_user and bl_user.Territory:
-            # Assuming BL users have a single territory defined for filtering patches
-            # This might need refinement based on exact hierarchy structure
-            query = query.filter(models.Doctor.bl_territory == bl_user.Territory)
+    """
+    Get patches for the selected territory.
 
-    patches = [p[0] for p in query.all() if p[0]]
-    return sorted(patches)
+    The selected territory can exist in ANY hierarchy column:
+        territory
+        bm_territory
+        bl_territory
+        bh_territory
+        sbuh_territory
+    """
+
+    print("=" * 70)
+    print("PATCH DEBUG START")
+    print(f"Selected territory: {territory}")
+    print(f"Selected region: {region}")
+    print(f"Current employee: {current_user_employee_id}")
+    print(f"Current role: {current_user_role}")
+
+    if not territory:
+        print("PATCH API: No territory received")
+        return []
+
+    # =========================================================
+    # 1. CHECK USER ACCESS
+    # =========================================================
+
+    if current_user_role == "BL" and current_user_employee_id:
+
+        hierarchy_service = HierarchyService(db)
+
+        accessible_territories = (
+            hierarchy_service.get_all_accessible_territories(
+                current_user_employee_id
+            )
+        )
+
+        normalized_selected = territory.strip().upper()
+
+        normalized_accessible = {
+            t.strip().upper()
+            for t in accessible_territories
+            if t
+        }
+
+        print(
+            f"Accessible territory count: "
+            f"{len(normalized_accessible)}"
+        )
+
+        print(
+            f"Selected territory accessible: "
+            f"{normalized_selected in normalized_accessible}"
+        )
+
+        if normalized_selected not in normalized_accessible:
+            print(
+                f"PATCH API: Territory '{territory}' "
+                f"is NOT accessible"
+            )
+            return []
+
+    # =========================================================
+    # 2. NORMALIZE SELECTED VALUES
+    # =========================================================
+
+    selected_territory = territory.strip().upper()
+
+    # =========================================================
+    # 3. START QUERY
+    # =========================================================
+
+    query = db.query(models.Doctor)
+
+    # =========================================================
+    # 4. FILTER SELECTED TERRITORY ACROSS ALL HIERARCHY
+    # =========================================================
+
+    territory_filter = or_(
+        func.upper(func.trim(models.Doctor.territory))
+        == selected_territory,
+
+        func.upper(func.trim(models.Doctor.bm_territory))
+        == selected_territory,
+
+        func.upper(func.trim(models.Doctor.bl_territory))
+        == selected_territory,
+
+        func.upper(func.trim(models.Doctor.bh_territory))
+        == selected_territory,
+
+        func.upper(func.trim(models.Doctor.sbuh_territory))
+        == selected_territory
+    )
+
+    query = query.filter(territory_filter)
+
+    # =========================================================
+    # 5. REGION FILTER
+    # =========================================================
+
+    if region:
+        selected_region = region.strip().upper()
+
+        query = query.filter(
+            func.upper(func.trim(models.Doctor.region))
+            == selected_region
+        )
+
+    # =========================================================
+    # 6. DEBUG DOCTOR COUNT
+    # =========================================================
+
+    doctors = query.all()
+
+    print(
+        f"Doctors matching territory"
+        f"{' + region' if region else ''}: "
+        f"{len(doctors)}"
+    )
+
+    # =========================================================
+    # 7. GET DISTINCT PATCHES
+    # =========================================================
+
+    rows = query.with_entities(
+        models.Doctor.patch
+    ).distinct().all()
+
+    patches = sorted(
+        {
+            row[0].strip()
+            for row in rows
+            if row[0] and row[0].strip()
+        }
+    )
+
+    print(f"Distinct patches: {patches}")
+    print(f"Patch count: {len(patches)}")
+
+    print("=" * 70)
+    print("PATCH DEBUG END")
+
+    return patches
 
 @app.get("/api/doctors/by-location")
 def get_doctors_by_location(
-    region: Optional[str] = Query(None, description="Filter by region"),
-    territory: Optional[str] = Query(None, description="Filter by territory"),
-    patch: Optional[str] = Query(None, description="Filter by patch"),
-    bl_territory: Optional[str] = Query(None, description="Filter by BL territory"),
+    region: Optional[str] = Query(None),
+    territory: Optional[str] = Query(None),
+    patch: Optional[str] = Query(None),
+    bl_territory: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
-    """Get doctors filtered by region, territory, patch and optional BL location"""
+    """
+    Get doctors using the selected hierarchy territory.
+
+    The selected territory may exist in:
+        - territory
+        - bm_territory
+        - bl_territory
+        - bh_territory
+        - sbuh_territory
+    """
+
+    print("=" * 70)
+    print("DOCTOR FETCH DEBUG START")
+    print(f"Region: {region}")
+    print(f"Selected Territory: {territory}")
+    print(f"Patch: {patch}")
+    print(f"BL Territory: {bl_territory}")
+
     query = db.query(models.Doctor)
-    
+
+    # ---------------------------------------------------------
+    # REGION
+    # ---------------------------------------------------------
     if region:
-        query = query.filter(models.Doctor.region == region)
-    
+        selected_region = region.strip().upper()
+
+        query = query.filter(
+            func.upper(func.trim(models.Doctor.region))
+            == selected_region
+        )
+
+    # ---------------------------------------------------------
+    # TERRITORY
+    # Search selected territory in ALL hierarchy columns
+    # ---------------------------------------------------------
     if territory:
-        query = query.filter(models.Doctor.territory == territory)
-    
+        selected_territory = territory.strip().upper()
+
+        territory_filter = or_(
+            func.upper(func.trim(models.Doctor.territory))
+            == selected_territory,
+
+            func.upper(func.trim(models.Doctor.bm_territory))
+            == selected_territory,
+
+            func.upper(func.trim(models.Doctor.bl_territory))
+            == selected_territory,
+
+            func.upper(func.trim(models.Doctor.bh_territory))
+            == selected_territory,
+
+            func.upper(func.trim(models.Doctor.sbuh_territory))
+            == selected_territory
+        )
+
+        query = query.filter(territory_filter)
+
+    # ---------------------------------------------------------
+    # PATCH
+    # ---------------------------------------------------------
     if patch:
-        query = query.filter(models.Doctor.patch == patch)
-    
-    if bl_territory:
-        query = query.filter(models.Doctor.bl_territory == bl_territory)
-    
+        selected_patch = patch.strip().upper()
+
+        query = query.filter(
+            func.upper(func.trim(models.Doctor.patch))
+            == selected_patch
+        )
+
+    # ---------------------------------------------------------
+    # FETCH DOCTORS
+    # ---------------------------------------------------------
     doctors = query.order_by(models.Doctor.name).all()
+
+    print(f"DOCTORS FOUND: {len(doctors)}")
+
+    for doctor in doctors[:10]:
+        print(
+            f"ID={doctor.id}, "
+            f"Name={doctor.name}, "
+            f"Territory={doctor.territory}, "
+            f"BM={doctor.bm_territory}, "
+            f"BL={doctor.bl_territory}, "
+            f"BH={doctor.bh_territory}, "
+            f"SBUH={doctor.sbuh_territory}, "
+            f"Patch={doctor.patch}"
+        )
+
+    print("DOCTOR FETCH DEBUG END")
+    print("=" * 70)
+
     return doctors
 
 @app.get("/api/doctors/search", response_model=List[schemas.Doctor])
@@ -325,6 +586,43 @@ def search_doctors(
 
 # ==================== DOCTOR SPECIFIC ROUTES ====================
 # These MUST come after the cascading routes above
+
+@app.get("/api/doctors/all_details")
+def get_all_doctors_details(db: Session = Depends(get_db)):
+    """Temporarily get all doctor details for debugging."""
+    doctors = db.query(models.Doctor).all()
+    return [{
+        "id": doctor.id,
+        "name": doctor.name,
+        "speciality": doctor.speciality,
+        "therapy_area": doctor.therapy_area,
+        "is_priority_doctor": doctor.is_priority_doctor,
+        "division": doctor.division,
+        "territory": doctor.territory,
+        "emp_code": doctor.emp_code,
+        "emp_name": doctor.emp_name,
+        "region": doctor.region,
+        "patch": doctor.patch,
+        "doctor_id_ext": doctor.doctor_id_ext,
+        "uid_number": doctor.uid_number,
+        "bm_territory": doctor.bm_territory,
+        "bl_territory": doctor.bl_territory,
+        "bh_territory": doctor.bh_territory,
+        "sbuh_territory": doctor.sbuh_territory,
+    } for doctor in doctors]
+
+@app.get("/api/doctor-interactions/by-date-user", response_model=List[schemas.DoctorInteraction])
+def get_interactions_by_date_user(
+    visit_date: date,
+    logged_by: str,
+    db: Session = Depends(get_db)
+):
+    """Get all doctor interactions logged by a specific user on a specific date"""
+    interactions = db.query(models.DoctorInteraction).filter(
+        models.DoctorInteraction.logged_by == logged_by,
+        models.DoctorInteraction.visit_date == visit_date
+    ).order_by(models.DoctorInteraction.visit_date.desc()).all()
+    return interactions
 
 @app.get("/api/doctors/{doctor_id}", response_model=schemas.Doctor)
 def get_doctor(doctor_id: int, db: Session = Depends(get_db)):
@@ -409,7 +707,7 @@ def get_doctor_history(
 
     return interactions
 
- # ==================== REQUESTS ====================
+# ==================== REQUESTS ====================
 
 def verify_request_creation_permission(request: schemas.RequestCreate):
     if request.requested_by_role not in REQUEST_CREATION_ROLES:
@@ -778,42 +1076,6 @@ def get_interactions_by_doctor(doctor_name: str, db: Session = Depends(get_db)):
     ).order_by(models.DoctorInteraction.visit_date.desc()).all()
     return interactions
 
-@app.get("/api/doctors/all_details")
-def get_all_doctors_details(db: Session = Depends(get_db)):
-    """Temporarily get all doctor details for debugging."""
-    doctors = db.query(models.Doctor).all()
-    return [{
-        "id": doctor.id,
-        "name": doctor.name,
-        "speciality": doctor.speciality,
-        "therapy_area": doctor.therapy_area,
-        "is_priority_doctor": doctor.is_priority_doctor,
-        "division": doctor.division,
-        "territory": doctor.territory,
-        "emp_code": doctor.emp_code,
-        "emp_name": doctor.emp_name,
-        "region": doctor.region,
-        "patch": doctor.patch,
-        "doctor_id_ext": doctor.doctor_id_ext,
-        "uid_number": doctor.uid_number,
-        "bm_territory": doctor.bm_territory,
-        "bl_territory": doctor.bl_territory,
-        "bh_territory": doctor.bh_territory,
-        "sbuh_territory": doctor.sbuh_territory,
-    } for doctor in doctors]
-
-@app.get("/api/doctor-interactions/by-date-user", response_model=List[schemas.DoctorInteraction])
-def get_interactions_by_date_user(
-    visit_date: date,
-    logged_by: str,
-    db: Session = Depends(get_db)
-):
-    """Get all doctor interactions logged by a specific user on a specific date"""
-    interactions = db.query(models.DoctorInteraction).filter(
-        models.DoctorInteraction.logged_by == logged_by,
-        models.DoctorInteraction.visit_date == visit_date
-    ).order_by(models.DoctorInteraction.created_at.desc()).all()
-    return interactions
 
 # ==================== OFFICE ACTIVITIES ====================
 
@@ -1223,6 +1485,8 @@ def get_daily_employee_summary(
                 calculated_work_type = "worked at office"
             elif len(doctor_interactions) > 0:
                 calculated_work_type = "call supported"
+            else:
+                calculated_work_type = "nothing done"
 
             # Format doctor interactions for response
             formatted_interactions = [
