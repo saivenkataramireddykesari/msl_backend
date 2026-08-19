@@ -27,7 +27,7 @@ app = FastAPI(title="Scientific Officer Management System")
 
 # CORS middleware — allow all origins for dev compatibility
 # Load CORS_ORIGINS from environment, fallback to a default list if not set
-CORS_ORIGINS_STR = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000,https://msl-frontend.netlify.app")
+CORS_ORIGINS_STR = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000,https://msl-frontend.netlify.app,https://so.pulsepharma.net")
 CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_STR.split(',')]
 
 app.add_middleware(
@@ -1380,10 +1380,32 @@ def get_monthly_employee_summary(
                 ) for oa in office_activities
             ]
             
+            # Get direct reportings from User table
+            reports_query = db.query(models.User).filter(
+                func.upper(func.trim(models.User.Reporting_Manager_Code)) == user.Emp_Code.strip().upper()
+            ).all()
+            direct_reports_data = [
+                {
+                    "employee_id": r.Emp_Code,
+                    "employee_name": r.Emp_Name,
+                    "role": r.Role,
+                    "territory": r.Territory,
+                    "hq": r.HQ,
+                    "region": r.Region
+                } for r in reports_query
+            ]
+
             # Create employee summary
             employee_summary = schemas.EmployeeMonthlySummary(
                 employee_id=user.Emp_Code,
                 employee_name=user.Emp_Name,
+                role=user.Role,
+                territory=user.Territory,
+                hq=user.HQ,
+                region=user.Region,
+                reporting_manager=user.Reporting_Manager,
+                reporting_manager_code=user.Reporting_Manager_Code,
+                direct_reports=direct_reports_data,
                 month=month,
                 year=year,
                 month_name=month_name_str,

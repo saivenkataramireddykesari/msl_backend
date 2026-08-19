@@ -264,6 +264,13 @@ class MonthlySummaryOfficeActivity(BaseModel):
 class EmployeeMonthlySummary(BaseModel):
     employee_id: str
     employee_name: str
+    role: Optional[str] = None
+    territory: Optional[str] = None
+    hq: Optional[str] = None
+    region: Optional[str] = None
+    reporting_manager: Optional[str] = None
+    reporting_manager_code: Optional[str] = None
+    direct_reports: Optional[List[dict]] = []
     month: int
     year: int
     month_name: str
