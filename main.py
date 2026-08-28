@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import extract, func
 from typing import List, Optional
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from calendar import month_name
 import os
 import models
@@ -1026,6 +1026,15 @@ def create_doctor_interaction(
     db: Session = Depends(get_db)
 ):
     """Log a doctor interaction with dynamic brand details"""
+    if interaction.visit_date:
+        today = date.today()
+        thirty_days_ago = today - timedelta(days=30)
+        if interaction.visit_date < thirty_days_ago or interaction.visit_date > today:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Visit date must be within the last 30 days ({thirty_days_ago} to {today})."
+            )
+
     # Verify request exists
     request = db.query(models.Request).filter(models.Request.id == interaction.request_id).first()
     if not request:
@@ -1090,6 +1099,15 @@ def create_office_activity(
         activity_dict = activity.model_dump()
         hours = activity_dict.get("hours_worked") or 0.0
         activity_date = activity_dict.get("activity_date")
+        
+        if activity_date:
+            today = date.today()
+            thirty_days_ago = today - timedelta(days=30)
+            if activity_date < thirty_days_ago or activity_date > today:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Activity date must be within the last 30 days ({thirty_days_ago} to {today})."
+                )
         
         # Auto-calculate doctor visits: count doctor interactions on the activity date
         # for the same MSL user
