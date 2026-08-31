@@ -1028,11 +1028,11 @@ def create_doctor_interaction(
     """Log a doctor interaction with dynamic brand details"""
     if interaction.visit_date:
         today = date.today()
-        thirty_days_ago = today - timedelta(days=30)
-        if interaction.visit_date < thirty_days_ago or interaction.visit_date > today:
+        ninety_days_ago = today - timedelta(days=90)
+        if interaction.visit_date < ninety_days_ago or interaction.visit_date > today:
             raise HTTPException(
                 status_code=400,
-                detail=f"Visit date must be within the last 30 days ({thirty_days_ago} to {today})."
+                detail=f"Visit date must be within the last 90 days ({ninety_days_ago} to {today})."
             )
 
     # Verify request exists
@@ -1102,11 +1102,11 @@ def create_office_activity(
         
         if activity_date:
             today = date.today()
-            thirty_days_ago = today - timedelta(days=30)
-            if activity_date < thirty_days_ago or activity_date > today:
+            ninety_days_ago = today - timedelta(days=90)
+            if activity_date < ninety_days_ago or activity_date > today:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Activity date must be within the last 30 days ({thirty_days_ago} to {today})."
+                    detail=f"Activity date must be within the last 90 days ({ninety_days_ago} to {today})."
                 )
         
         # Auto-calculate doctor visits: count doctor interactions on the activity date
