@@ -624,6 +624,18 @@ def get_interactions_by_date_user(
     ).order_by(models.DoctorInteraction.visit_date.desc()).all()
     return interactions
 
+@app.get("/api/doctor-interactions/by-user", response_model=List[schemas.DoctorInteraction])
+def get_interactions_by_user(
+    logged_by: str,
+    db: Session = Depends(get_db)
+):
+    """Get all doctor interactions logged by a specific user"""
+    interactions = db.query(models.DoctorInteraction).filter(
+        models.DoctorInteraction.logged_by == logged_by
+    ).order_by(models.DoctorInteraction.visit_date.desc()).all()
+    return interactions
+
+
 @app.get("/api/doctors/{doctor_id}", response_model=schemas.Doctor)
 def get_doctor(doctor_id: int, db: Session = Depends(get_db)):
     """Get a specific doctor by ID"""
