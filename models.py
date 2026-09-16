@@ -75,6 +75,7 @@ class Request(Base):
     rx_status_brand1 = Column(String(50), nullable=True)
     rx_status_brand2 = Column(String(50), nullable=True)
 
+    request_date = Column(Date, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships

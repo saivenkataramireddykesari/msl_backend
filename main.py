@@ -4,7 +4,7 @@ from sqlalchemy import or_
 
 load_dotenv()
 
-from fastapi import FastAPI, Depends, HTTPException, Query, status
+from fastapi import FastAPI, Depends, HTTPException, Query, Body, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import extract, func
@@ -22,6 +22,20 @@ from services.hierarchy_service import HierarchyService
 # Do not drop/create tables to preserve existing data
 # models.Base.metadata.drop_all(bind=engine)
 models.Base.metadata.create_all(bind=engine)
+
+# Auto-migrate request_date column if missing
+with engine.connect() as conn:
+    try:
+        from sqlalchemy import text, inspect
+        inspector = inspect(engine)
+        if 'requests' in inspector.get_table_names():
+            columns = [c['name'] for c in inspector.get_columns('requests')]
+            if 'request_date' not in columns:
+                conn.execute(text("ALTER TABLE requests ADD COLUMN request_date DATE;"))
+                conn.commit()
+                print("DEBUG: Added 'request_date' column to 'requests' table.")
+    except Exception as e:
+        print(f"DEBUG: Auto-migration note: {e}")
 
 app = FastAPI(title="Scientific Officer Management System")
 
@@ -744,10 +758,17 @@ def create_request(request: schemas.RequestCreate, db: Session = Depends(get_db)
     
     print(f"DEBUG - Doctor found: {doctor.name}")
     
+    if request.request_date and request.request_date < date.today():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Request date must be current date or a future date"
+        )
+
     try:
         # Create request with explicit field assignment
         db_request = models.Request(
             doctor_id=request.doctor_id,
+            request_date=request.request_date or date.today(),
             territory=doctor.territory,
             region=doctor.region,
             requested_by=request.requested_by,
@@ -865,6 +886,7 @@ def get_requests(
             "rx_status_brand1": request.rx_status_brand1,
             "rx_status_brand2": request.rx_status_brand2,
             "num_visits": visit_count or 0,
+            "request_date": request.request_date.isoformat() if request.request_date else (request.created_at.date().isoformat() if request.created_at else None),
             "created_at": request.created_at.isoformat() if request.created_at else None
         })
     
@@ -944,6 +966,63 @@ def assign_request(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to assign request: {str(e)}")
+
+@app.put("/api/requests/{request_id}/date")
+def update_request_date(
+    request_id: int,
+    request_date: Optional[str] = Query(None, description="New request date YYYY-MM-DD"),
+    payload: Optional[dict] = Body(None),
+    db: Session = Depends(get_db)
+):
+    """Update request date with transaction safety"""
+    try:
+        date_str = request_date
+        if not date_str and payload and isinstance(payload, dict):
+            date_str = payload.get("request_date")
+
+        if not date_str:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="request_date is required"
+            )
+
+        if isinstance(date_str, date):
+            target_date = date_str
+        else:
+            try:
+                target_date = date.fromisoformat(str(date_str).strip())
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid date format. Expected YYYY-MM-DD."
+                )
+
+        if target_date < date.today():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Request date must be current date or a future date"
+            )
+
+        request = db.query(models.Request).filter(models.Request.id == request_id).first()
+        if not request:
+            raise HTTPException(status_code=404, detail="Request not found")
+
+        request.request_date = target_date
+        db.commit()
+        db.refresh(request)
+        print(f"DEBUG - Request {request_id} request date updated to {target_date}")
+        return {
+            "message": "Request date updated successfully",
+            "request_date": request.request_date.isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"ERROR - Failed to update request date for request {request_id}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to update request date: {str(e)}")
 
 @app.put("/api/requests/{request_id}/user-classification")
 def update_request_user_classification(
@@ -1271,11 +1350,19 @@ def debug_employee_names(
 
 # ==================== MONTHLY EMPLOYEE SUMMARY REPORT ====================
 
+@app.get("/api/reports/roles")
+def get_user_roles(db: Session = Depends(get_db)):
+    """Get list of distinct user roles"""
+    roles = db.query(models.User.Role).distinct().all()
+    roles_list = sorted([r[0].strip() for r in roles if r[0] and r[0].strip()])
+    return roles_list
+
 @app.get("/api/reports/monthly-summary", response_model=schemas.MonthlyReportResponse)
 def get_monthly_employee_summary(
     month: int = Query(..., ge=1, le=12, description="Month (1-12)"),
     year: int = Query(..., ge=2000, le=2100, description="Year (e.g., 2024)"),
-    employee_ids: Optional[str] = Query(None, description="Comma-separated employee IDs (e.g., \'E9250,E5057\')"),
+    employee_ids: Optional[str] = Query(None, description="Comma-separated employee IDs"),
+    role: Optional[str] = Query(None, description="Filter by user role"),
     db: Session = Depends(get_db)
 ):
     """
@@ -1286,17 +1373,19 @@ def get_monthly_employee_summary(
         # Parse employee IDs if provided
         target_employee_ids = []
         if employee_ids:
-            target_employee_ids = [eid.strip() for eid in employee_ids.split(",")]
+            target_employee_ids = [eid.strip() for eid in employee_ids.split(",") if eid.strip()]
         
-        # Get all users or filter by specific employee IDs
+        # Get all users or filter by specific employee IDs / role
         users_query = db.query(models.User)
         if target_employee_ids:
             users_query = users_query.filter(models.User.Emp_Code.in_(target_employee_ids))
+        if role and role.strip() and role.strip().lower() != "all":
+            users_query = users_query.filter(models.User.Role == role.strip())
         
         users = users_query.all()
         
         if not users:
-            raise HTTPException(status_code=404, detail="No employees found with the specified IDs")
+            raise HTTPException(status_code=404, detail="No employees found for the specified criteria")
         
         # Prepare month name
         month_name_str = month_name[month]
@@ -1317,7 +1406,10 @@ def get_monthly_employee_summary(
                 models.DoctorInteraction.logged_by == user.Emp_Name,
                 extract("month", models.DoctorInteraction.visit_date) == month,
                 extract("year", models.DoctorInteraction.visit_date) == year
-            ).options(joinedload(models.DoctorInteraction.brands)).order_by(models.DoctorInteraction.visit_date.desc()).all()
+            ).options(
+                joinedload(models.DoctorInteraction.brands),
+                joinedload(models.DoctorInteraction.request).joinedload(models.Request.doctor)
+            ).order_by(models.DoctorInteraction.visit_date.desc()).all()
             print(f"DEBUG: Found {len(doctor_interactions)} doctor interactions for {user.Emp_Name}")
             
             # Get office activities for this user in the specified month
@@ -1385,14 +1477,24 @@ def get_monthly_employee_summary(
             # Convert daily summary map to sorted list
             daily_summary = sorted(daily_summary_map.values(), key=lambda x: x["date"])
             
-            # Format doctor interactions for response
+            # Format doctor interactions for response with doctor & request metadata
             formatted_interactions = [
                 schemas.MonthlySummaryDoctorInteraction(
                     id=di.id,
                     doctor_name=di.doctor_name,
                     visit_date=di.visit_date,
                     objections=di.objections,
-                    brands=di.brands
+                    brands=di.brands,
+                    speciality=di.request.doctor.speciality if di.request and di.request.doctor else None,
+                    therapy_area=di.request.doctor.therapy_area if di.request and di.request.doctor else (di.request.therapy_area if di.request else None),
+                    division=di.request.doctor.division if di.request and di.request.doctor else None,
+                    territory=di.request.doctor.territory if di.request and di.request.doctor else (di.request.territory if di.request else None),
+                    region=di.request.doctor.region if di.request and di.request.doctor else (di.request.region if di.request else None),
+                    patch=di.request.doctor.patch if di.request and di.request.doctor else None,
+                    is_priority_doctor=di.request.doctor.is_priority_doctor if di.request and di.request.doctor else None,
+                    requested_by=di.request.requested_by if di.request else None,
+                    requested_by_role=di.request.requested_by_role if di.request else None,
+                    request_id=di.request_id
                 ) for di in doctor_interactions
             ]
             
@@ -1484,27 +1586,30 @@ def get_monthly_employee_summary(
 def get_daily_employee_summary(
     report_date: date = Query(..., description="Date for the daily report (YYYY-MM-DD)"),
     employee_ids: Optional[str] = Query(None, description="Comma-separated employee IDs (e.g., 'E9250,E5057')"),
+    role: Optional[str] = Query(None, description="Filter by user role"),
     db: Session = Depends(get_db)
 ):
     """
     Get daily working summary report for specified employees.
-    If employee_ids is not provided, returns report for all employees.
+    If employee_ids is not provided, returns report for all employees (optionally filtered by role).
     """
     try:
         # Parse employee IDs if provided
         target_employee_ids = []
         if employee_ids:
-            target_employee_ids = [eid.strip() for eid in employee_ids.split(",")]
+            target_employee_ids = [eid.strip() for eid in employee_ids.split(",") if eid.strip()]
         
-        # Get all users or filter by specific employee IDs
+        # Get all users or filter by specific employee IDs / role
         users_query = db.query(models.User)
         if target_employee_ids:
             users_query = users_query.filter(models.User.Emp_Code.in_(target_employee_ids))
+        if role and role.strip() and role.strip().lower() != "all":
+            users_query = users_query.filter(models.User.Role == role.strip())
         
         users = users_query.all()
         
         if not users:
-            raise HTTPException(status_code=404, detail="No employees found with the specified IDs")
+            raise HTTPException(status_code=404, detail="No employees found for the specified criteria")
 
         employee_summaries = []
         
@@ -1513,6 +1618,9 @@ def get_daily_employee_summary(
             doctor_interactions = db.query(models.DoctorInteraction).filter(
                 models.DoctorInteraction.logged_by == user.Emp_Name,
                 models.DoctorInteraction.visit_date == report_date
+            ).options(
+                joinedload(models.DoctorInteraction.brands),
+                joinedload(models.DoctorInteraction.request).joinedload(models.Request.doctor)
             ).order_by(models.DoctorInteraction.visit_date.desc()).all()
             
             # Get office activities for this user on the specified date
@@ -1540,14 +1648,24 @@ def get_daily_employee_summary(
             else:
                 calculated_work_type = "nothing done"
 
-            # Format doctor interactions for response
+            # Format doctor interactions for response with doctor & request metadata
             formatted_interactions = [
                 schemas.MonthlySummaryDoctorInteraction(
                     id=di.id,
                     doctor_name=di.doctor_name,
                     visit_date=di.visit_date,
                     objections=di.objections,
-                    brands=di.brands
+                    brands=di.brands,
+                    speciality=di.request.doctor.speciality if di.request and di.request.doctor else None,
+                    therapy_area=di.request.doctor.therapy_area if di.request and di.request.doctor else (di.request.therapy_area if di.request else None),
+                    division=di.request.doctor.division if di.request and di.request.doctor else None,
+                    territory=di.request.doctor.territory if di.request and di.request.doctor else (di.request.territory if di.request else None),
+                    region=di.request.doctor.region if di.request and di.request.doctor else (di.request.region if di.request else None),
+                    patch=di.request.doctor.patch if di.request and di.request.doctor else None,
+                    is_priority_doctor=di.request.doctor.is_priority_doctor if di.request and di.request.doctor else None,
+                    requested_by=di.request.requested_by if di.request else None,
+                    requested_by_role=di.request.requested_by_role if di.request else None,
+                    request_id=di.request_id
                 ) for di in doctor_interactions
             ]
             
@@ -1568,6 +1686,12 @@ def get_daily_employee_summary(
             employee_summary = schemas.EmployeeDailySummary(
                 employee_id=user.Emp_Code,
                 employee_name=user.Emp_Name,
+                role=user.Role,
+                territory=user.Territory,
+                hq=user.HQ,
+                region=user.Region,
+                reporting_manager=user.Reporting_Manager,
+                reporting_manager_code=user.Reporting_Manager_Code,
                 report_date=report_date,
                 day_name=report_date.strftime("%A"),  # Full weekday name
                 total_doctor_visits=len(doctor_interactions),
@@ -1598,4 +1722,4 @@ def get_daily_employee_summary(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

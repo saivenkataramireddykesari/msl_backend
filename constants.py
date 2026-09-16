@@ -6,5 +6,7 @@ REQUEST_CREATION_ROLES = [
     "SBUH",
     "TE",
     "KAE",
-    "NE"
+    "NE",
+    "Asst General Manager",
+    "Associate Vice President"
 ]

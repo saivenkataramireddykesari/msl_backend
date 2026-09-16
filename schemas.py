@@ -112,6 +112,7 @@ class RequestAssign(BaseModel):
 # Request Schemas
 class RequestBase(BaseModel):
     doctor_id: int
+    request_date: Optional[date] = None
     brand: Optional[str] = None
     objective: Optional[str] = None
     expected_outcome: Optional[str] = None
@@ -147,6 +148,7 @@ class Request(RequestBase):
 class RequestSummary(BaseModel):
     id: int
     doctor_id: int
+    request_date: Optional[date] = None
     requested_by: str
     requested_by_role: str
     brand: Optional[str] = None
@@ -244,6 +246,16 @@ class MonthlySummaryDoctorInteraction(BaseModel):
     visit_date: date
     objections: Optional[str] = None
     brands: List[InteractionBrand] = []  # Dynamic brands
+    speciality: Optional[str] = None
+    therapy_area: Optional[str] = None
+    division: Optional[str] = None
+    territory: Optional[str] = None
+    region: Optional[str] = None
+    patch: Optional[str] = None
+    is_priority_doctor: Optional[bool] = None
+    requested_by: Optional[str] = None
+    requested_by_role: Optional[str] = None
+    request_id: Optional[int] = None
     
     class Config:
         from_attributes = True
@@ -317,6 +329,12 @@ class MonthlyReportResponse(BaseModel):
 class EmployeeDailySummary(BaseModel):
     employee_id: str
     employee_name: str
+    role: Optional[str] = None
+    territory: Optional[str] = None
+    hq: Optional[str] = None
+    region: Optional[str] = None
+    reporting_manager: Optional[str] = None
+    reporting_manager_code: Optional[str] = None
     report_date: date
     day_name: str
     
