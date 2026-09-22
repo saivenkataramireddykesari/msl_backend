@@ -813,85 +813,240 @@ def get_requests(
     username: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
-    # Subquery: count doctor interactions per request
-    interaction_count_subq = db.query(
-        models.DoctorInteraction.request_id,
-        func.count(models.DoctorInteraction.id).label("visit_count")
-    ).group_by(models.DoctorInteraction.request_id).subquery()
+    """
+    Get requests with doctor details and visit counts.
 
-    # Query requests with doctor name, division, territory, region and visit count
-    query = db.query(
-        models.Request,
-        models.Doctor.name.label("doctor_name"),
-        models.Doctor.division.label("division"),
-        models.Doctor.territory.label("territory"),
-        models.Doctor.region.label("region"),
-        interaction_count_subq.c.visit_count
-    ).join(
-        models.Doctor, models.Request.doctor_id == models.Doctor.id
-    ).outerjoin(
-        interaction_count_subq, models.Request.id == interaction_count_subq.c.request_id
-    )
+    MSL / Scientific Officer:
+        Returns requests assigned to the logged-in MSL/Scientific Officer.
 
-    # Filter based on role and username
-    if role in ["MSL", "Scientific Officer"]:
-        if username:
-            query = query.filter(models.Request.assigned_msl == username)
-    elif role in ["BL", "BM"]:
-        if username:
-            query = query.filter(models.Request.requested_by == username)
+    BL / BM:
+        Returns requests created by the logged-in BL/BM.
 
-    if search:
-        query = query.filter(models.Doctor.name.ilike(f"%{search}%"))
+    Uses OUTER JOIN for doctors so a request is not
+    removed just because its doctor_id has no matching
+    record in the doctors table.
+    """
 
-    if territory:
-        query = query.filter(models.Doctor.territory == territory)
+    try:
+        print("=" * 70)
+        print("REQUEST FETCH DEBUG")
+        print(f"Role: {repr(role)}")
+        print(f"Username: {repr(username)}")
+        print(f"Search: {repr(search)}")
+        print(f"Territory: {repr(territory)}")
+        print(f"Region: {repr(region)}")
+        print(f"Therapy: {repr(therapy)}")
+        print(f"Requested By: {repr(requested_by)}")
 
-    if region:
-        query = query.filter(models.Doctor.region == region)
+        # ---------------------------------------------------------
+        # SUBQUERY: Count doctor interactions for each request
+        # ---------------------------------------------------------
+        interaction_count_subq = db.query(
+            models.DoctorInteraction.request_id,
+            func.count(models.DoctorInteraction.id).label("visit_count")
+        ).group_by(
+            models.DoctorInteraction.request_id
+        ).subquery()
 
-    if therapy:
-        query = query.filter(models.Request.therapy_area == therapy)
+        # ---------------------------------------------------------
+        # MAIN QUERY
+        #
+        # IMPORTANT:
+        # Use OUTER JOIN instead of INNER JOIN.
+        #
+        # Some requests have doctor_id values that do not match
+        # doctors.id. INNER JOIN removes those requests completely.
+        # OUTER JOIN keeps the request and returns doctor fields as None.
+        # ---------------------------------------------------------
+        query = db.query(
+            models.Request,
+            models.Doctor.name.label("doctor_name"),
+            models.Doctor.division.label("division"),
+            models.Doctor.territory.label("territory"),
+            models.Doctor.region.label("region"),
+            interaction_count_subq.c.visit_count
+        ).outerjoin(
+            models.Doctor,
+            models.Request.doctor_id == models.Doctor.id
+        ).outerjoin(
+            interaction_count_subq,
+            models.Request.id == interaction_count_subq.c.request_id
+        )
 
-    if requested_by:
-        query = query.filter(models.Request.requested_by == requested_by)
+        # ---------------------------------------------------------
+        # ROLE-BASED FILTERING
+        # ---------------------------------------------------------
+        if role in ["MSL", "Scientific Officer"]:
+            if username:
+                print(
+                    f"Filtering requests by assigned_msl = "
+                    f"{repr(username)}"
+                )
 
-    results = query.order_by(models.Request.created_at.desc()).all()
+                query = query.filter(
+                    models.Request.assigned_msl == username
+                )
 
-    # Build response manually to ensure all fields are included
-    response_data = []
-    for request, doctor_name, division, territory, region, visit_count in results:
-        response_data.append({
-            "id": request.id,
-            "doctor_id": request.doctor_id,
-            "doctor_name": doctor_name,
-            "territory": territory,
-            "region": region,
-            "therapy_area": request.therapy_area,
-            "brand": request.brand,
-            "objective": request.objective,
-            "expected_outcome": request.expected_outcome,
-            "priority": request.priority,
-            "notes": request.notes,
-            "brand2": request.brand2,
-            "objective2": request.objective2,
-            "expected_outcome2": request.expected_outcome2,
-            "priority2": request.priority2,
-            "notes2": request.notes2,
-            "user_classification": request.user_classification,
-            "requested_by": request.requested_by,
-            "requested_by_role": request.requested_by_role,
-            "assigned_msl": request.assigned_msl,
-            "request_status": request.request_status or "Pending",
-            "rx_status_brand1": request.rx_status_brand1,
-            "rx_status_brand2": request.rx_status_brand2,
-            "num_visits": visit_count or 0,
-            "request_date": request.request_date.isoformat() if request.request_date else (request.created_at.date().isoformat() if request.created_at else None),
-            "created_at": request.created_at.isoformat() if request.created_at else None
-        })
-    
-    return response_data
+        elif role in ["BL", "BM"]:
+            if username:
+                print(
+                    f"Filtering requests by requested_by = "
+                    f"{repr(username)}"
+                )
 
+                query = query.filter(
+                    models.Request.requested_by == username
+                )
+
+        # ---------------------------------------------------------
+        # SEARCH FILTER
+        # ---------------------------------------------------------
+        if search:
+            query = query.filter(
+                models.Doctor.name.ilike(f"%{search}%")
+            )
+
+        # ---------------------------------------------------------
+        # TERRITORY FILTER
+        # ---------------------------------------------------------
+        if territory:
+            query = query.filter(
+                models.Doctor.territory == territory
+            )
+
+        # ---------------------------------------------------------
+        # REGION FILTER
+        # ---------------------------------------------------------
+        if region:
+            query = query.filter(
+                models.Doctor.region == region
+            )
+
+        # ---------------------------------------------------------
+        # THERAPY FILTER
+        # ---------------------------------------------------------
+        if therapy:
+            query = query.filter(
+                models.Request.therapy_area == therapy
+            )
+
+        # ---------------------------------------------------------
+        # REQUESTED BY FILTER
+        # ---------------------------------------------------------
+        if requested_by:
+            query = query.filter(
+                models.Request.requested_by == requested_by
+            )
+
+        # ---------------------------------------------------------
+        # EXECUTE QUERY
+        # ---------------------------------------------------------
+        results = query.order_by(
+            models.Request.created_at.desc()
+        ).all()
+
+        print(f"DEBUG - Requests found: {len(results)}")
+
+        # ---------------------------------------------------------
+        # BUILD RESPONSE
+        # ---------------------------------------------------------
+        response_data = []
+
+        for (
+            request,
+            doctor_name,
+            division,
+            doctor_territory,
+            doctor_region,
+            visit_count
+        ) in results:
+
+            response_data.append({
+                "id": request.id,
+
+                # Request information
+                "doctor_id": request.doctor_id,
+                "doctor_name": doctor_name,
+
+                # Doctor information
+                "division": division,
+                "territory": doctor_territory,
+                "region": doctor_region,
+
+                # Request details
+                "therapy_area": request.therapy_area,
+                "brand": request.brand,
+                "objective": request.objective,
+                "expected_outcome": request.expected_outcome,
+                "priority": request.priority,
+                "notes": request.notes,
+
+                # Second brand
+                "brand2": request.brand2,
+                "objective2": request.objective2,
+                "expected_outcome2": request.expected_outcome2,
+                "priority2": request.priority2,
+                "notes2": request.notes2,
+
+                # Classification
+                "user_classification": request.user_classification,
+
+                # User information
+                "requested_by": request.requested_by,
+                "requested_by_role": request.requested_by_role,
+                "assigned_msl": request.assigned_msl,
+
+                # Status
+                "request_status": request.request_status or "Pending",
+                "rx_status_brand1": request.rx_status_brand1,
+                "rx_status_brand2": request.rx_status_brand2,
+
+                # Visit count
+                "num_visits": visit_count or 0,
+
+                # Dates
+                "request_date": (
+                    request.request_date.isoformat()
+                    if request.request_date
+                    else (
+                        request.created_at.date().isoformat()
+                        if request.created_at
+                        else None
+                    )
+                ),
+
+                "created_at": (
+                    request.created_at.isoformat()
+                    if request.created_at
+                    else None
+                )
+            })
+
+        print(
+            f"DEBUG - Returning {len(response_data)} requests "
+            f"to frontend"
+        )
+
+        print("=" * 70)
+
+        return response_data
+
+    except Exception as e:
+        print("=" * 70)
+        print("ERROR - Failed to fetch requests")
+        print(f"Error: {str(e)}")
+
+        import traceback
+        traceback.print_exc()
+
+        print("=" * 70)
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch requests: {str(e)}"
+        )
+
+        
 @app.get("/api/requests/{request_id}", response_model=schemas.Request)
 def get_request(
     request_id: int,
