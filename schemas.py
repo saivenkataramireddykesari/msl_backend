@@ -235,6 +235,7 @@ class ActivityLog(BaseModel):
     created_at: datetime
     brands: Optional[List[str]] = None  # List of brand names discussed
     logged_by: Optional[str] = None  # MSL who logged the visit
+    brands_detail: Optional[List[dict]] = []  # Detailed brand info
     
     class Config:
         from_attributes = True
