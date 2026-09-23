@@ -41,12 +41,16 @@ app = FastAPI(title="Scientific Officer Management System")
 
 # CORS middleware — allow all origins for dev compatibility
 # Load CORS_ORIGINS from environment, fallback to a default list if not set
-CORS_ORIGINS_STR = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000,https://msl-frontend.netlify.app,https://so.pulsepharma.net")
-CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_STR.split(',')]
+# CORS_ORIGINS_STR = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000,https://msl-frontend.netlify.app,https://so.pulsepharma.net")
+# CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_STR.split(',')]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
+     allow_origins=[
+        "https://so.pulsepharma.net",
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
