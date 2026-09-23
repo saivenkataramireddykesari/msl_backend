@@ -806,6 +806,39 @@ def create_request(request: schemas.RequestCreate, db: Session = Depends(get_db)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+def resolve_user_match_strings(db: Session, username: str) -> List[str]:
+    if not username:
+        return []
+    
+    matches = {username, username.strip()}
+    clean_username = ' '.join(username.split())
+    matches.add(clean_username)
+    matches.add(clean_username.replace(' ', '  '))
+    
+    user_filters = [
+        models.User.Emp_Code == username,
+        models.User.Emp_Name.ilike(f"%{clean_username}%"),
+        func.replace(models.User.Emp_Name, '  ', ' ').ilike(f"%{clean_username}%")
+    ]
+    if hasattr(models.User, 'username'):
+        user_filters.append(models.User.username == username)
+
+    try:
+        users = db.query(models.User).filter(or_(*user_filters)).all()
+        for u in users:
+            if getattr(u, 'Emp_Code', None):
+                matches.add(u.Emp_Code)
+            if getattr(u, 'Emp_Name', None):
+                emp_name = u.Emp_Name
+                matches.add(emp_name)
+                c_name = ' '.join(emp_name.split())
+                matches.add(c_name)
+                matches.add(c_name.replace(' ', '  '))
+    except Exception as e:
+        print(f"Warning resolving user match strings for '{username}': {e}")
+        
+    return [m for m in matches if m]
+
 @app.get("/api/requests")
 def get_requests(
     search: Optional[str] = None,
@@ -847,31 +880,30 @@ def get_requests(
 
         # ============================================================
         # 2. DOCTOR NAME SUBQUERY
-        #
-        # Request doctor_id may contain either:
-        #   - doctors.id
-        #   - doctors.doctor_id_ext
-        #
-        # Therefore check BOTH.
+        # Check logged activity first, then fallback to Doctor table
         # ============================================================
 
-        doctor_name_subq = db.query(
+        interaction_doc_subq = db.query(
+            models.DoctorInteraction.doctor_name
+        ).filter(
+            models.DoctorInteraction.request_id == models.Request.id,
+            models.DoctorInteraction.doctor_name.isnot(None),
+            models.DoctorInteraction.doctor_name != ""
+        ).order_by(models.DoctorInteraction.id.desc()).limit(1).scalar_subquery()
+
+        doctor_table_subq = db.query(
             models.Doctor.name
         ).filter(
             or_(
                 models.Doctor.id == models.Request.doctor_id,
-
-                models.Doctor.doctor_id_ext ==
-                cast(models.Request.doctor_id, String)
+                models.Doctor.doctor_id_ext == cast(models.Request.doctor_id, String)
             )
         ).limit(1).scalar_subquery()
 
+        doctor_name_subq = func.coalesce(interaction_doc_subq, doctor_table_subq)
+
         # ============================================================
         # 3. MAIN QUERY
-        #
-        # DO NOT JOIN doctors here.
-        #
-        # Region and territory are already stored in requests.
         # ============================================================
 
         query = db.query(
@@ -896,45 +928,48 @@ def get_requests(
         # ============================================================
 
         if role in ["MSL", "Scientific Officer"]:
-
             if username:
-                print(
-                    f"Filtering by assigned_msl = {repr(username)}"
-                )
-
-                query = query.filter(
-                    models.Request.assigned_msl == username
-                )
+                user_matches = resolve_user_match_strings(db, username)
+                print(f"Filtering by assigned_msl using match strings: {user_matches}")
+                match_conds = []
+                for m in user_matches:
+                    match_conds.append(models.Request.assigned_msl.ilike(m))
+                    match_conds.append(func.replace(models.Request.assigned_msl, '  ', ' ').ilike(' '.join(m.split())))
+                if match_conds:
+                    query = query.filter(or_(*match_conds))
 
         elif role in ["BL", "BM"]:
-
             if username:
-                print(
-                    f"Filtering by requested_by = {repr(username)}"
-                )
-
-                query = query.filter(
-                    models.Request.requested_by == username
-                )
+                user_matches = resolve_user_match_strings(db, username)
+                print(f"Filtering by requested_by using match strings: {user_matches}")
+                match_conds = []
+                for m in user_matches:
+                    match_conds.append(models.Request.requested_by.ilike(m))
+                    match_conds.append(func.replace(models.Request.requested_by, '  ', ' ').ilike(' '.join(m.split())))
+                if match_conds:
+                    query = query.filter(or_(*match_conds))
 
         # ============================================================
         # 5. SEARCH DOCTOR
-        #
-        # Since doctor_name is a scalar subquery, use EXISTS.
         # ============================================================
 
         if search:
             search_pattern = f"%{search}%"
 
             query = query.filter(
-                db.query(models.Doctor.id).filter(
-                    or_(
-                        models.Doctor.id == models.Request.doctor_id,
-                        models.Doctor.doctor_id_ext ==
-                        cast(models.Request.doctor_id, String)
-                    ),
-                    models.Doctor.name.ilike(search_pattern)
-                ).exists()
+                or_(
+                    db.query(models.DoctorInteraction.id).filter(
+                        models.DoctorInteraction.request_id == models.Request.id,
+                        models.DoctorInteraction.doctor_name.ilike(search_pattern)
+                    ).exists(),
+                    db.query(models.Doctor.id).filter(
+                        or_(
+                            models.Doctor.id == models.Request.doctor_id,
+                            models.Doctor.doctor_id_ext == cast(models.Request.doctor_id, String)
+                        ),
+                        models.Doctor.name.ilike(search_pattern)
+                    ).exists()
+                )
             )
 
         # ============================================================
@@ -1152,8 +1187,17 @@ def get_request(
         raise HTTPException(status_code=404, detail="Request not found")
         
     # Enforce that MSLs can only view requests assigned to them
-    if role in ["MSL", "Scientific Officer"]:
-        if request.assigned_msl != username:
+    if role in ["MSL", "Scientific Officer"] and username:
+        user_matches = resolve_user_match_strings(db, username)
+        req_msl = request.assigned_msl or ""
+        req_msl_clean = ' '.join(req_msl.split()).lower()
+        is_assigned = any(
+            m.lower() == req_msl_clean or
+            m.lower() in req_msl_clean or
+            req_msl_clean in m.lower()
+            for m in user_matches
+        )
+        if not is_assigned and req_msl:
             raise HTTPException(status_code=403, detail="Access denied. You are not assigned to this request.")
             
     return request
