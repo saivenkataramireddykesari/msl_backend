@@ -761,12 +761,6 @@ def create_request(request: schemas.RequestCreate, db: Session = Depends(get_db)
         raise HTTPException(status_code=404, detail="Doctor not found")
     
     print(f"DEBUG - Doctor found: {doctor.name}")
-    
-    if request.request_date and request.request_date < date.today():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Request date must be current date or a future date"
-        )
 
     try:
         # Create request with explicit field assignment
@@ -1287,12 +1281,6 @@ def update_request_date(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Invalid date format. Expected YYYY-MM-DD."
                 )
-
-        if target_date < date.today():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Request date must be current date or a future date"
-            )
 
         request = db.query(models.Request).filter(models.Request.id == request_id).first()
         if not request:
