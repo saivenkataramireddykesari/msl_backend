@@ -374,3 +374,36 @@ class Brand(BrandBase):
 
     class Config:
         from_attributes = True
+
+# Planned Visit Schemas
+class PlannedVisitDoctorDetail(BaseModel):
+    request_id: int
+    doctor_id: int
+    doctor_name: str
+    speciality: Optional[str] = None
+    patch: Optional[str] = None
+    brand: Optional[str] = None
+    brand2: Optional[str] = None
+    status: Optional[str] = "Pending"
+    user_classification: Optional[str] = "default"
+
+class PlannedVisitGroup(BaseModel):
+    id: str
+    scientific_officer: str
+    region: Optional[str] = None
+    territory: Optional[str] = None
+    requested_date: Optional[str] = None
+    requested_by: str
+    requested_by_role: str
+    count_planned_doctors: int
+    doctors: List[PlannedVisitDoctorDetail] = []
+
+class PlannedVisitsResponse(BaseModel):
+    total_planned_visits: int
+    total_planned_doctors: int
+    total_scientific_officers: int
+    scientific_officers_list: List[str] = []
+    regions_list: List[str] = []
+    territories_list: List[str] = []
+    planned_visits: List[PlannedVisitGroup] = []
+

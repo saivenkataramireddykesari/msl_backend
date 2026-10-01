@@ -1999,6 +1999,179 @@ def get_daily_employee_summary(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to generate daily report: {str(e)}")
 
+# ==================== PLANNED VISITS REPORT ====================
+
+@app.get("/api/planned-visits", response_model=schemas.PlannedVisitsResponse)
+def get_planned_visits(
+    region: Optional[str] = Query(None, description="Filter by region"),
+    territory: Optional[str] = Query(None, description="Filter by territory"),
+    scientific_officer: Optional[str] = Query(None, description="Filter by assigned MSL/Scientific Officer"),
+    requested_by: Optional[str] = Query(None, description="Filter by BL name"),
+    month: Optional[int] = Query(None, description="Month filter (1-12)"),
+    year: Optional[int] = Query(None, description="Year filter (e.g. 2026)"),
+    search: Optional[str] = Query(None, description="Search across fields"),
+    db: Session = Depends(get_db)
+):
+    """
+    Get requests raised by BLs for all scientific officers, aggregated with region, territory, requested date, and count of planned doctors.
+    """
+    try:
+        if not isinstance(region, str): region = None
+        if not isinstance(territory, str): territory = None
+        if not isinstance(scientific_officer, str): scientific_officer = None
+        if not isinstance(requested_by, str): requested_by = None
+        if not isinstance(search, str): search = None
+        if not isinstance(month, int) and month is not None:
+            try: month = int(month)
+            except: month = None
+        if not isinstance(year, int) and year is not None:
+            try: year = int(year)
+            except: year = None
+
+        # Query requests raised by BLs (case-insensitive check on requested_by_role)
+        query = db.query(models.Request).filter(
+            func.upper(func.trim(models.Request.requested_by_role)) == "BL"
+        )
+
+        req_date_col = func.coalesce(models.Request.request_date, func.date(models.Request.created_at))
+
+        if month:
+            query = query.filter(extract("month", req_date_col) == month)
+        if year:
+            query = query.filter(extract("year", req_date_col) == year)
+
+        if region:
+            query = query.filter(models.Request.region == region)
+        if territory:
+            query = query.filter(models.Request.territory == territory)
+        if scientific_officer:
+            if scientific_officer.lower() == "unassigned":
+                query = query.filter(
+                    or_(models.Request.assigned_msl.is_(None), func.trim(models.Request.assigned_msl) == "")
+                )
+            else:
+                query = query.filter(models.Request.assigned_msl.ilike(f"%{scientific_officer}%"))
+        if requested_by:
+            query = query.filter(models.Request.requested_by.ilike(f"%{requested_by}%"))
+
+        all_requests = query.all()
+
+        # Batch load doctors map for fast lookup
+        doctor_ids = [r.doctor_id for r in all_requests if r.doctor_id]
+        doctors_map = {}
+        if doctor_ids:
+            doctors = db.query(models.Doctor).filter(models.Doctor.id.in_(doctor_ids)).all()
+            for d in doctors:
+                doctors_map[d.id] = d
+
+        groups_map = {}
+        so_set = set()
+        regions_set = set()
+        territories_set = set()
+
+        for r in all_requests:
+            so_name = r.assigned_msl.strip() if r.assigned_msl and r.assigned_msl.strip() else "Unassigned"
+            reg = r.region or "N/A"
+            terr = r.territory or "N/A"
+            req_date_str = (
+                r.request_date.isoformat()
+                if r.request_date
+                else (r.created_at.date().isoformat() if r.created_at else "N/A")
+            )
+            bl_name = r.requested_by or "N/A"
+
+            if reg != "N/A":
+                regions_set.add(reg)
+            if terr != "N/A":
+                territories_set.add(terr)
+            so_set.add(so_name)
+
+            doc = doctors_map.get(r.doctor_id)
+            doc_name = doc.name if doc else f"Doctor #{r.doctor_id}"
+
+            # Grouping key
+            group_key = (so_name, reg, terr, req_date_str, bl_name)
+
+            if group_key not in groups_map:
+                groups_map[group_key] = {
+                    "scientific_officer": so_name,
+                    "region": reg,
+                    "territory": terr,
+                    "requested_date": req_date_str,
+                    "requested_by": bl_name,
+                    "requested_by_role": r.requested_by_role or "BL",
+                    "doctors": []
+                }
+
+            groups_map[group_key]["doctors"].append(
+                schemas.PlannedVisitDoctorDetail(
+                    request_id=r.id,
+                    doctor_id=r.doctor_id,
+                    doctor_name=doc_name,
+                    speciality=doc.speciality if doc else None,
+                    patch=doc.patch if doc else None,
+                    brand=r.brand,
+                    brand2=r.brand2,
+                    status=r.request_status or "Pending",
+                    user_classification=r.user_classification or "default"
+                )
+            )
+
+        # Build response list
+        visit_groups = []
+        idx = 1
+        for (so_name, reg, terr, req_date_str, bl_name), data in groups_map.items():
+            # Apply search filter if present
+            if search:
+                s_lower = search.lower()
+                matches_search = (
+                    s_lower in so_name.lower()
+                    or s_lower in reg.lower()
+                    or s_lower in terr.lower()
+                    or s_lower in bl_name.lower()
+                    or s_lower in req_date_str.lower()
+                    or any(s_lower in d.doctor_name.lower() for d in data["doctors"])
+                )
+                if not matches_search:
+                    continue
+
+            visit_groups.append(
+                schemas.PlannedVisitGroup(
+                    id=str(idx),
+                    scientific_officer=data["scientific_officer"],
+                    region=data["region"],
+                    territory=data["territory"],
+                    requested_date=data["requested_date"],
+                    requested_by=data["requested_by"],
+                    requested_by_role=data["requested_by_role"],
+                    count_planned_doctors=len(data["doctors"]),
+                    doctors=data["doctors"]
+                )
+            )
+            idx += 1
+
+        # Sort by requested_date desc, scientific_officer asc
+        visit_groups.sort(key=lambda x: (x.requested_date or "", x.scientific_officer), reverse=True)
+
+        total_planned_doctors = sum(g.count_planned_doctors for g in visit_groups)
+
+        return schemas.PlannedVisitsResponse(
+            total_planned_visits=len(visit_groups),
+            total_planned_doctors=total_planned_doctors,
+            total_scientific_officers=len(so_set),
+            scientific_officers_list=sorted(list(so_set)),
+            regions_list=sorted(list(regions_set)),
+            territories_list=sorted(list(territories_set)),
+            planned_visits=visit_groups
+        )
+
+    except Exception as e:
+        print(f"ERROR - Failed to fetch planned visits: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to fetch planned visits: {str(e)}")
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
