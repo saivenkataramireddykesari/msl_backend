@@ -109,6 +109,11 @@ class RequestAssign(BaseModel):
     assigned_msl: Optional[str] = None
     assigned_by: str
 
+class RequestBulkAssign(BaseModel):
+    request_ids: List[int]
+    assigned_msl: Optional[str] = None
+    assigned_by: str
+
 # Request Schemas
 class RequestBase(BaseModel):
     doctor_id: int

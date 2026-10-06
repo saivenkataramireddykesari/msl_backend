@@ -1196,6 +1196,63 @@ def get_request(
             
     return request
 
+@app.put("/api/requests/bulk-assign")
+def bulk_assign_requests(
+    assign_data: schemas.RequestBulkAssign,
+    db: Session = Depends(get_db)
+):
+    """Bulk assign/reassign multiple requests to a single MSL/Scientific Officer"""
+    try:
+        if not assign_data.request_ids:
+            raise HTTPException(status_code=400, detail="No request IDs provided")
+
+        requests = db.query(models.Request).filter(models.Request.id.in_(assign_data.request_ids)).all()
+        if not requests:
+            raise HTTPException(status_code=404, detail="No matching requests found")
+
+        updated_count = 0
+        new_msl = assign_data.assigned_msl
+
+        for request in requests:
+            previous_msl = request.assigned_msl
+            if previous_msl != new_msl:
+                request.assigned_msl = new_msl
+                if new_msl:
+                    request.request_status = "In Progress"
+                    request.brand1_status = "In Progress"
+                    if request.brand2:
+                        request.brand2_status = "In Progress"
+                else:
+                    request.request_status = "Pending"
+                    request.brand1_status = "Pending"
+                    if request.brand2:
+                        request.brand2_status = "Pending"
+
+                log_entry = models.RequestAssignmentLog(
+                    request_id=request.id,
+                    assigned_by=assign_data.assigned_by,
+                    previous_msl=previous_msl,
+                    new_msl=new_msl
+                )
+                db.add(log_entry)
+                updated_count += 1
+
+        db.commit()
+        return {
+            "message": f"Successfully updated {updated_count} request(s)",
+            "updated_count": updated_count,
+            "assigned_msl": new_msl
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"ERROR - Failed bulk assign: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to bulk assign requests: {str(e)}")
+
+
 @app.put("/api/requests/{request_id}/assign")
 def assign_request(
     request_id: int,
