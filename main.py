@@ -636,7 +636,9 @@ def get_interactions_by_date_user(
     db: Session = Depends(get_db)
 ):
     """Get all doctor interactions logged by a specific user on a specific date"""
-    interactions = db.query(models.DoctorInteraction).filter(
+    interactions = db.query(models.DoctorInteraction).options(
+        joinedload(models.DoctorInteraction.brands)
+    ).filter(
         models.DoctorInteraction.logged_by == logged_by,
         models.DoctorInteraction.visit_date == visit_date
     ).order_by(models.DoctorInteraction.visit_date.desc()).all()
@@ -648,7 +650,9 @@ def get_interactions_by_user(
     db: Session = Depends(get_db)
 ):
     """Get all doctor interactions logged by a specific user"""
-    interactions = db.query(models.DoctorInteraction).filter(
+    interactions = db.query(models.DoctorInteraction).options(
+        joinedload(models.DoctorInteraction.brands)
+    ).filter(
         models.DoctorInteraction.logged_by == logged_by
     ).order_by(models.DoctorInteraction.visit_date.desc()).all()
     return interactions
@@ -1580,23 +1584,42 @@ def create_office_activity(
 
 @app.get("/api/office-activities", response_model=List[schemas.OfficeActivity])
 def get_office_activities(msl_username: Optional[str] = None, db: Session = Depends(get_db)):
-    """Get all office activities, dynamically updating doctors_visited and work_type based on current doctor interactions"""
+    """Get all activities for an MSL, dynamically syncing doctor visits and work types across office activities and field interactions"""
     try:
         print(f"DEBUG - Fetching activities for msl_username: {msl_username}")
         query = db.query(models.OfficeActivity)
         if msl_username:
             query = query.filter(models.OfficeActivity.msl_username == msl_username)
-        activities = query.order_by(models.OfficeActivity.activity_date.desc()).all()
-        print(f"DEBUG - Found {len(activities)} activities")
-        
-        # Dynamically sync/count matching doctor visits and update the local object properties before serialization
-        for a in activities:
-            doc_count = db.query(models.DoctorInteraction).filter(
-                models.DoctorInteraction.logged_by == a.msl_username,
-                models.DoctorInteraction.visit_date == a.activity_date
-            ).count()
+        office_activities = query.order_by(models.OfficeActivity.activity_date.desc()).all()
+
+        # Build map of doctor interaction counts per date for this user
+        if msl_username:
+            interactions = db.query(
+                models.DoctorInteraction.visit_date,
+                func.count(models.DoctorInteraction.id)
+            ).filter(
+                models.DoctorInteraction.logged_by == msl_username
+            ).group_by(models.DoctorInteraction.visit_date).all()
+            interactions_by_user_date = {(msl_username, v_date): cnt for v_date, cnt in interactions}
+        else:
+            interactions = db.query(
+                models.DoctorInteraction.logged_by,
+                models.DoctorInteraction.visit_date,
+                func.count(models.DoctorInteraction.id)
+            ).group_by(
+                models.DoctorInteraction.logged_by,
+                models.DoctorInteraction.visit_date
+            ).all()
+            interactions_by_user_date = {(usr, v_date): cnt for usr, v_date, cnt in interactions if usr}
+
+        # Track existing (msl_username, activity_date) pairs
+        existing_pairs = set()
+        for a in office_activities:
+            pair = (a.msl_username, a.activity_date)
+            existing_pairs.add(pair)
+            doc_count = interactions_by_user_date.get(pair, 0)
             a.doctors_visited = doc_count
-            
+
             hours = a.hours_worked or 0.0
             if hours > 0.0 and doc_count > 0:
                 a.work_type = "both done"
@@ -1606,10 +1629,33 @@ def get_office_activities(msl_username: Optional[str] = None, db: Session = Depe
                 a.work_type = "call supported"
             else:
                 a.work_type = "nothing done"
-                
-            print(f"  - ID: {a.id}, Date: {a.activity_date}, User: {a.msl_username}, Hours: {a.hours_worked}, Auto-counted Doctors: {a.doctors_visited}, Calculated Work Type: {a.work_type}")
-            
-        return activities
+
+        # Synthesize field activity entries for days where doctor visits occurred without office activity
+        field_activities = []
+        for (user_name, visit_date), doc_count in interactions_by_user_date.items():
+            if (user_name, visit_date) not in existing_pairs and doc_count > 0:
+                synthetic_id = - (abs(hash(f"{user_name}_{visit_date}")) % 10000000) - 1
+                field_act = schemas.OfficeActivity(
+                    id=synthetic_id,
+                    msl_username=user_name,
+                    activity_date=visit_date,
+                    activity_category="Call Supported",
+                    summary=f"Supported {doc_count} doctor visit{'s' if doc_count > 1 else ''} (Field Call)",
+                    linked_outputs=None,
+                    work_type="call supported",
+                    hours_worked=0.0,
+                    doctors_visited=doc_count,
+                    created_at=datetime.combine(visit_date, datetime.min.time())
+                )
+                field_activities.append(field_act)
+
+        all_activities = sorted(
+            list(office_activities) + field_activities,
+            key=lambda x: x.activity_date,
+            reverse=True
+        )
+        print(f"DEBUG - Found {len(all_activities)} total activities ({len(office_activities)} office, {len(field_activities)} field-only)")
+        return all_activities
     except Exception as e:
         print(f"ERROR - Failed to fetch activities: {str(e)}")
         import traceback
@@ -1618,10 +1664,10 @@ def get_office_activities(msl_username: Optional[str] = None, db: Session = Depe
 
 @app.get("/api/office-activities/users", response_model=List[str])
 def get_office_activity_users(db: Session = Depends(get_db)):
-    """Get unique list of MSL usernames who have logged activities"""
-    users = db.query(models.OfficeActivity.msl_username).distinct().all()
-    # Filter out None values and return flat list
-    return [u[0] for u in users if u[0]]
+    """Get unique list of MSL usernames who have logged activities or doctor interactions"""
+    act_users = [u[0] for u in db.query(models.OfficeActivity.msl_username).distinct().all() if u[0]]
+    int_users = [u[0] for u in db.query(models.DoctorInteraction.logged_by).distinct().all() if u[0]]
+    return sorted(list(set(act_users + int_users)))
 
 # ==================== SUMMARY VIEW ====================
 
@@ -2227,6 +2273,409 @@ def get_planned_visits(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to fetch planned visits: {str(e)}")
+
+# ==================== TOUR PLANS ====================
+
+@app.get("/api/tour-plans/meta")
+def get_tour_plan_meta(db: Session = Depends(get_db)):
+    """Returns available divisions and scientific officers for creating a tour plan"""
+    try:
+        doc_divs = db.query(models.Doctor.division).filter(models.Doctor.division.isnot(None)).distinct().all()
+        user_divs = db.query(models.User.Division).filter(models.User.Division.isnot(None)).distinct().all()
+        
+        all_divs = set()
+        for (d,) in doc_divs:
+            if d and d.strip():
+                all_divs.add(d.strip())
+        for (d,) in user_divs:
+            if d and d.strip():
+                all_divs.add(d.strip())
+        
+        divisions_list = sorted(list(all_divs))
+
+        msl_users = db.query(models.User).filter(
+            models.User.Role.in_(["MSL", "Scientific Officer"])
+        ).order_by(models.User.Emp_Name).all()
+
+        so_list = [
+            {
+                "id": u.id,
+                "name": u.Emp_Name or "Unknown",
+                "employee_code": u.Emp_Code or "",
+                "email": u.email1 or "",
+                "role": u.Role or "Scientific Officer"
+            }
+            for u in msl_users
+        ]
+
+        return {
+            "divisions": divisions_list,
+            "scientific_officers": so_list
+        }
+    except Exception as e:
+        print(f"Error fetching tour plan metadata: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/tour-plans/territories")
+def get_tour_plan_territories(
+    divisions: Optional[str] = Query(None, description="Comma-separated divisions"),
+    db: Session = Depends(get_db)
+):
+    """Returns distinct territories for selected divisions"""
+    try:
+        if not divisions:
+            return []
+
+        div_list = [d.strip() for d in divisions.split(",") if d.strip()]
+        if not div_list:
+            return []
+
+        doc_terrs = db.query(models.Doctor.territory).filter(
+            models.Doctor.division.in_(div_list),
+            models.Doctor.territory.isnot(None)
+        ).distinct().all()
+
+        user_terrs = db.query(models.User.Territory).filter(
+            models.User.Division.in_(div_list),
+            models.User.Territory.isnot(None)
+        ).distinct().all()
+
+        all_terrs = set()
+        for (t,) in doc_terrs:
+            if t and t.strip():
+                all_terrs.add(t.strip())
+        for (t,) in user_terrs:
+            if t and t.strip():
+                all_terrs.add(t.strip())
+
+        return sorted(list(all_terrs))
+    except Exception as e:
+        print(f"Error fetching territories for divisions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/tour-plans")
+def create_tour_plan(
+    plan: schemas.TourPlanCreate,
+    current_user_role: Optional[str] = Query(None),
+    current_user_name: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """
+    Only Asst General Manager (or Admin) can create a tour plan.
+    Saves the plan, assigns it to a Scientific Officer,
+    and triggers email notifications to the assigned Scientific Officer and relevant Business Leaders (BLs).
+    """
+    try:
+        caller_role = (current_user_role or plan.created_by_role or "").strip()
+        allowed_roles = ["Asst General Manager", "Associate Vice President", "Admin", "admin"]
+        if caller_role not in allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied: Only Asst General Manager role can create a tour plan."
+            )
+
+        if plan.from_date > plan.to_date:
+            raise HTTPException(
+                status_code=400,
+                detail="From Date cannot be later than To Date."
+            )
+
+        if not plan.divisions:
+            raise HTTPException(
+                status_code=400,
+                detail="Please select at least one division."
+            )
+
+        if not plan.territories:
+            raise HTTPException(
+                status_code=400,
+                detail="Please select at least one territory."
+            )
+
+        if not plan.assigned_so:
+            raise HTTPException(
+                status_code=400,
+                detail="Please select a Scientific Officer to assign the tour plan."
+            )
+
+        import json
+        from calendar import month_name
+        from services.email_service import send_email, build_tour_plan_email_html
+
+        month_val = plan.month or month_name[plan.from_date.month]
+        year_val = plan.year or str(plan.from_date.year)
+        creator_name = current_user_name or plan.created_by or "Asst General Manager"
+
+        db_plan = models.TourPlan(
+            from_date=plan.from_date,
+            to_date=plan.to_date,
+            month=month_val,
+            year=year_val,
+            divisions=json.dumps(plan.divisions),
+            territories=json.dumps(plan.territories),
+            assigned_so=plan.assigned_so,
+            assigned_so_id=plan.assigned_so_id,
+            assigned_so_code=plan.assigned_so_code,
+            created_by=creator_name,
+            created_by_emp_code=plan.created_by_emp_code,
+            created_by_role=caller_role,
+            remarks=plan.remarks or "",
+            status="Planned"
+        )
+        db.add(db_plan)
+        db.commit()
+        db.refresh(db_plan)
+
+        # Trigger Email Notifications
+        email_summary = {
+            "scientific_officer": None,
+            "business_leaders": []
+        }
+
+        plan_dict = {
+            "from_date": plan.from_date,
+            "to_date": plan.to_date,
+            "month": month_val,
+            "year": year_val,
+            "divisions": plan.divisions,
+            "territories": plan.territories,
+            "assigned_so": plan.assigned_so,
+            "remarks": plan.remarks
+        }
+
+        # 1. Email to Assigned Scientific Officer
+        so_user = db.query(models.User).filter(
+            models.User.Role.in_(["MSL", "Scientific Officer"]),
+            or_(
+                models.User.Emp_Name == plan.assigned_so,
+                models.User.Emp_Code == plan.assigned_so_code,
+                models.User.id == plan.assigned_so_id
+            )
+        ).first()
+
+        if so_user and so_user.email1 and so_user.email1.strip():
+            so_email = so_user.email1.strip()
+            so_subject = f"New Tour Plan Assigned ({plan.from_date} to {plan.to_date}) | Pulse Scientific Office"
+            so_html = build_tour_plan_email_html(
+                recipient_name=so_user.Emp_Name or plan.assigned_so,
+                recipient_role="Scientific Officer",
+                is_so=True,
+                plan_data=plan_dict,
+                created_by_name=creator_name
+            )
+            res = send_email(to_email=so_email, subject=so_subject, html_content=so_html)
+            email_summary["scientific_officer"] = {
+                "name": so_user.Emp_Name,
+                "email": so_email,
+                "status": "sent" if res.get("success") else "failed"
+            }
+        else:
+            so_name = so_user.Emp_Name if so_user else plan.assigned_so
+            email_summary["scientific_officer"] = {
+                "name": so_name,
+                "email": None,
+                "status": "skipped (no email registered)"
+            }
+
+        # 2. Email to Business Leaders (BLs) of target divisions
+        bl_users = db.query(models.User).filter(
+            models.User.Role == "BL",
+            or_(
+                models.User.Division.in_(plan.divisions),
+                models.User.Territory.in_(plan.territories)
+            )
+        ).all()
+
+        seen_emails = set()
+        for bl in bl_users:
+            bl_email = (bl.email1 or "").strip()
+            bl_name = bl.Emp_Name or bl.Territory or "Business Leader"
+            if bl_email and bl_email not in seen_emails:
+                seen_emails.add(bl_email)
+                bl_subject = f"Tour Plan Notification: {bl.Division or 'Division'} ({plan.from_date} to {plan.to_date}) | Pulse Scientific Office"
+                bl_html = build_tour_plan_email_html(
+                    recipient_name=bl_name,
+                    recipient_role=f"Business Leader ({bl.Division or ''})",
+                    is_so=False,
+                    plan_data=plan_dict,
+                    created_by_name=creator_name
+                )
+                res = send_email(to_email=bl_email, subject=bl_subject, html_content=bl_html)
+                email_summary["business_leaders"].append({
+                    "name": bl_name,
+                    "email": bl_email,
+                    "division": bl.Division,
+                    "status": "sent" if res.get("success") else "failed"
+                })
+            elif not bl_email:
+                email_summary["business_leaders"].append({
+                    "name": bl_name,
+                    "email": None,
+                    "division": bl.Division,
+                    "status": "skipped (no email registered)"
+                })
+
+        return {
+            "message": "Tour plan created successfully and notifications triggered",
+            "plan": {
+                "id": db_plan.id,
+                "from_date": db_plan.from_date,
+                "to_date": db_plan.to_date,
+                "month": db_plan.month,
+                "year": db_plan.year,
+                "divisions": plan.divisions,
+                "territories": plan.territories,
+                "assigned_so": db_plan.assigned_so,
+                "created_by": db_plan.created_by,
+                "created_by_role": db_plan.created_by_role,
+                "status": db_plan.status,
+                "remarks": db_plan.remarks,
+                "created_at": db_plan.created_at
+            },
+            "emails_triggered": email_summary
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        print(f"Error creating tour plan: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to create tour plan: {str(e)}")
+
+@app.get("/api/tour-plans")
+def get_tour_plans(
+    role: Optional[str] = None,
+    username: Optional[str] = None,
+    employee_id: Optional[str] = None,
+    division: Optional[str] = None,
+    month: Optional[str] = None,
+    year: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Get tour plans filtered according to role:
+    - Asst General Manager / Admin: sees all tour plans
+    - Scientific Officer: sees plans assigned to them
+    - BL: sees plans matching their division or territory
+    """
+    import json
+    try:
+        query = db.query(models.TourPlan)
+
+        if month:
+            query = query.filter(models.TourPlan.month == month)
+        if year:
+            query = query.filter(models.TourPlan.year == year)
+
+        plans = query.order_by(models.TourPlan.from_date.desc()).all()
+
+        result = []
+        user_role = (role or "").strip()
+
+        # If BL role, find BL's division and territory
+        bl_division = (division or "").strip()
+        bl_territory = ""
+        if user_role == "BL" and (username or employee_id):
+            bl_user = None
+            if employee_id:
+                bl_user = db.query(models.User).filter(
+                    func.upper(func.trim(models.User.Emp_Code)) == employee_id.strip().upper()
+                ).first()
+            if not bl_user and username:
+                bl_user = db.query(models.User).filter(
+                    func.upper(func.trim(models.User.Emp_Name)) == username.strip().upper()
+                ).first()
+            if bl_user:
+                if bl_user.Division:
+                    bl_division = bl_user.Division.strip()
+                if bl_user.Territory:
+                    bl_territory = bl_user.Territory.strip()
+
+        for p in plans:
+            try:
+                p_divs = json.loads(p.divisions) if p.divisions else []
+            except Exception:
+                p_divs = [d.strip() for d in p.divisions.split(",") if d.strip()]
+
+            try:
+                p_terrs = json.loads(p.territories) if p.territories else []
+            except Exception:
+                p_terrs = [t.strip() for t in p.territories.split(",") if t.strip()]
+
+            # Role filtering logic
+            if user_role in ["Asst General Manager", "Associate Vice President", "Admin", "admin", ""]:
+                # Full visibility
+                pass
+            elif user_role in ["MSL", "Scientific Officer"]:
+                # Visibility only if assigned to this SO
+                matches_so = False
+                if username and p.assigned_so.strip().lower() == username.strip().lower():
+                    matches_so = True
+                if employee_id and p.assigned_so_code and p.assigned_so_code.strip().lower() == employee_id.strip().lower():
+                    matches_so = True
+                if not matches_so:
+                    continue
+            elif user_role == "BL":
+                # Visibility only if BL's division or territory matches
+                matches_bl = False
+                if bl_division and any(d.lower() == bl_division.lower() for d in p_divs):
+                    matches_bl = True
+                if bl_territory and any(t.lower() == bl_territory.lower() for t in p_terrs):
+                    matches_bl = True
+                if not matches_bl:
+                    continue
+            else:
+                if bl_division and not any(d.lower() == bl_division.lower() for d in p_divs):
+                    continue
+
+            result.append({
+                "id": p.id,
+                "from_date": p.from_date,
+                "to_date": p.to_date,
+                "month": p.month,
+                "year": p.year,
+                "divisions": p_divs,
+                "territories": p_terrs,
+                "assigned_so": p.assigned_so,
+                "assigned_so_id": p.assigned_so_id,
+                "assigned_so_code": p.assigned_so_code,
+                "created_by": p.created_by,
+                "created_by_emp_code": p.created_by_emp_code,
+                "created_by_role": p.created_by_role,
+                "status": p.status,
+                "remarks": p.remarks,
+                "created_at": p.created_at,
+                "updated_at": p.updated_at
+            })
+
+        return result
+
+    except Exception as e:
+        print(f"Error fetching tour plans: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/tour-plans/{plan_id}")
+def delete_tour_plan(
+    plan_id: int,
+    current_user_role: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """Allows Asst General Manager or Admin to delete a tour plan"""
+    caller_role = (current_user_role or "").strip()
+    if caller_role not in ["Asst General Manager", "Associate Vice President", "Admin", "admin"]:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    
+    plan = db.query(models.TourPlan).filter(models.TourPlan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Tour plan not found")
+    
+    db.delete(plan)
+    db.commit()
+    return {"message": "Tour plan deleted successfully", "id": plan_id}
 
 if __name__ == "__main__":
     import uvicorn

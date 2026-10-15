@@ -241,3 +241,26 @@ class RequestStatus(Base):
     display_name = Column(String(100), nullable=False)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+class TourPlan(Base):
+    """Stores monthly field tour plans created by Asst General Manager"""
+    __tablename__ = "tour_plans"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    month = Column(String(20), nullable=True)             # e.g., "October" or "10"
+    year = Column(String(10), nullable=True)              # e.g., "2026"
+    from_date = Column(Date, nullable=False)
+    to_date = Column(Date, nullable=False)
+    divisions = Column(Text, nullable=False)              # JSON list of division names
+    territories = Column(Text, nullable=False)            # JSON list of territory names
+    assigned_so = Column(String(255), nullable=False)     # Scientific Officer Emp_Name
+    assigned_so_id = Column(Integer, nullable=True)       # User.id of SO
+    assigned_so_code = Column(String(50), nullable=True)  # Emp_Code of SO
+    created_by = Column(String(255), nullable=False)      # Asst General Manager's name
+    created_by_emp_code = Column(String(50), nullable=True)# Asst General Manager's code
+    created_by_role = Column(String(100), default="Asst General Manager")
+    status = Column(String(50), default="Planned")        # "Planned", "Ongoing", "Completed", "Cancelled"
+    remarks = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+

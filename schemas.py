@@ -412,3 +412,48 @@ class PlannedVisitsResponse(BaseModel):
     territories_list: List[str] = []
     planned_visits: List[PlannedVisitGroup] = []
 
+# Tour Plan Schemas
+class TourPlanBase(BaseModel):
+    from_date: date
+    to_date: date
+    month: Optional[str] = None
+    year: Optional[str] = None
+    divisions: List[str]
+    territories: List[str]
+    assigned_so: str
+    assigned_so_id: Optional[int] = None
+    assigned_so_code: Optional[str] = None
+    remarks: Optional[str] = None
+
+class TourPlanCreate(TourPlanBase):
+    created_by: Optional[str] = None
+    created_by_emp_code: Optional[str] = None
+    created_by_role: Optional[str] = "Asst General Manager"
+
+class TourPlanResponse(BaseModel):
+    id: int
+    from_date: date
+    to_date: date
+    month: Optional[str] = None
+    year: Optional[str] = None
+    divisions: List[str]
+    territories: List[str]
+    assigned_so: str
+    assigned_so_id: Optional[int] = None
+    assigned_so_code: Optional[str] = None
+    created_by: str
+    created_by_emp_code: Optional[str] = None
+    created_by_role: Optional[str] = None
+    status: str
+    remarks: Optional[str] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+class TourPlanMetaResponse(BaseModel):
+    divisions: List[str]
+    scientific_officers: List[dict]
+
+
