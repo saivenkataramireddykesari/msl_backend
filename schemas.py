@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 from datetime import datetime, date
 
 # Doctor Schemas
@@ -226,6 +226,8 @@ class LoginResponse(BaseModel):
     role: str
     employee_id: str
     message: str
+    territory: Optional[str] = None
+    region: Optional[str] = None
     bl_territory: Optional[str] = None
     bl_region: Optional[str] = None
     division: Optional[str] = None
@@ -423,6 +425,7 @@ class TourPlanBase(BaseModel):
     assigned_so: str
     assigned_so_id: Optional[int] = None
     assigned_so_code: Optional[str] = None
+    assigned_so_email: Optional[str] = None
     remarks: Optional[str] = None
 
 class TourPlanCreate(TourPlanBase):
@@ -441,11 +444,13 @@ class TourPlanResponse(BaseModel):
     assigned_so: str
     assigned_so_id: Optional[int] = None
     assigned_so_code: Optional[str] = None
+    assigned_so_email: Optional[str] = None
     created_by: str
     created_by_emp_code: Optional[str] = None
     created_by_role: Optional[str] = None
     status: str
     remarks: Optional[str] = None
+    email_status: Optional[Any] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 

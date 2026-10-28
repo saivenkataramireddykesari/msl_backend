@@ -256,11 +256,13 @@ class TourPlan(Base):
     assigned_so = Column(String(255), nullable=False)     # Scientific Officer Emp_Name
     assigned_so_id = Column(Integer, nullable=True)       # User.id of SO
     assigned_so_code = Column(String(50), nullable=True)  # Emp_Code of SO
+    assigned_so_email = Column(String(255), nullable=True)# Email of SO
     created_by = Column(String(255), nullable=False)      # Asst General Manager's name
     created_by_emp_code = Column(String(50), nullable=True)# Asst General Manager's code
     created_by_role = Column(String(100), default="Asst General Manager")
     status = Column(String(50), default="Planned")        # "Planned", "Ongoing", "Completed", "Cancelled"
     remarks = Column(Text, nullable=True)
+    email_status = Column(Text, nullable=True)            # JSON summary of email dispatch
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

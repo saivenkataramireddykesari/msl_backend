@@ -34,6 +34,12 @@ with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE requests ADD COLUMN request_date DATE;"))
                 conn.commit()
                 print("DEBUG: Added 'request_date' column to 'requests' table.")
+        if 'tour_plans' in inspector.get_table_names():
+            tp_columns = [c['name'] for c in inspector.get_columns('tour_plans')]
+            if 'assigned_so_email' not in tp_columns:
+                conn.execute(text("ALTER TABLE tour_plans ADD COLUMN assigned_so_email VARCHAR(255) NULL;"))
+                conn.commit()
+                print("DEBUG: Added 'assigned_so_email' column to 'tour_plans' table.")
     except Exception as e:
         print(f"DEBUG: Auto-migration note: {e}")
 
@@ -84,9 +90,11 @@ def login(login_data: schemas.LoginRequest, db: Session = Depends(get_db)):
         "role": user.Role,
         "employee_id": user.Emp_Code,
         "message": "Login successful",
-        "bl_territory": user.Territory if user.Role == "BL" else None,
-        "bl_region": user.Region if user.Role in ["BL", "BM"] else None,
-        "division": user.Division
+        "territory": user.Territory,
+        "region": user.Region,
+        "division": user.Division,
+        "bl_territory": user.Territory if user.Role in ["BL", "BH"] else None,
+        "bl_region": user.Region if user.Role in ["BL", "BM", "BH"] else None,
     }
 
 @app.post("/api/login-by-employee-id", response_model=schemas.LoginResponse)
@@ -114,9 +122,11 @@ def login_by_employee_id(login_data: schemas.UrlLoginRequest, db: Session = Depe
         "role": user.Role,
         "employee_id": user.Emp_Code,
         "message": "Login successful",
-        "bl_territory": user.Territory if user.Role == "BL" else None,
-        "bl_region": user.Region if user.Role in ["BL", "BM"] else None,
-        "division": user.Division
+        "territory": user.Territory,
+        "region": user.Region,
+        "division": user.Division,
+        "bl_territory": user.Territory if user.Role in ["BL", "BH"] else None,
+        "bl_region": user.Region if user.Role in ["BL", "BM", "BH"] else None,
     }
 
 @app.get("/api/users", response_model=List[schemas.User])
@@ -304,7 +314,7 @@ def get_territories_by_region(
         models.Doctor.region == region
     ).distinct()
     
-    if current_user_role == "BL" and current_user_employee_id:
+    if current_user_role in ("BL", "BH") and current_user_employee_id:
         bl_user = db.query(models.User).filter(models.User.Emp_Code == current_user_employee_id).first()
         if bl_user and bl_user.Territory:
             query = query.filter(models.Doctor.territory == bl_user.Territory)
@@ -348,7 +358,7 @@ def get_patches_by_territory(
     # 1. CHECK USER ACCESS
     # =========================================================
 
-    if current_user_role == "BL" and current_user_employee_id:
+    if current_user_role in ("BL", "BH") and current_user_employee_id:
 
         hierarchy_service = HierarchyService(db)
 
@@ -842,6 +852,7 @@ def get_requests(
     search: Optional[str] = None,
     territory: Optional[str] = None,
     region: Optional[str] = None,
+    division: Optional[str] = None,
     therapy: Optional[str] = None,
     requested_by: Optional[str] = None,
     role: Optional[str] = None,
@@ -900,6 +911,15 @@ def get_requests(
 
         doctor_name_subq = func.coalesce(interaction_doc_subq, doctor_table_subq)
 
+        doctor_div_subq = db.query(
+            models.Doctor.division
+        ).filter(
+            or_(
+                models.Doctor.id == models.Request.doctor_id,
+                models.Doctor.doctor_id_ext == cast(models.Request.doctor_id, String)
+            )
+        ).limit(1).scalar_subquery()
+
         # ============================================================
         # 3. MAIN QUERY
         # ============================================================
@@ -913,6 +933,7 @@ def get_requests(
             # Use values stored in requests
             models.Request.territory.label("request_territory"),
             models.Request.region.label("request_region"),
+            doctor_div_subq.label("doctor_division"),
 
             # Visit count
             interaction_count_subq.c.visit_count
@@ -936,7 +957,7 @@ def get_requests(
                 if match_conds:
                     query = query.filter(or_(*match_conds))
 
-        elif role in ["BL", "BM"]:
+        elif role in ["BL", "BM", "BH", "SBUH", "BE"]:
             if username:
                 user_matches = resolve_user_match_strings(db, username)
                 print(f"Filtering by requested_by using match strings: {user_matches}")
@@ -994,6 +1015,17 @@ def get_requests(
                 models.Request.region == region
             )
 
+        if division:
+            query = query.filter(
+                db.query(models.Doctor.id).filter(
+                    or_(
+                        models.Doctor.id == models.Request.doctor_id,
+                        models.Doctor.doctor_id_ext == cast(models.Request.doctor_id, String)
+                    ),
+                    func.upper(func.trim(models.Doctor.division)) == division.strip().upper()
+                ).exists()
+            )
+
         # ============================================================
         # 8. THERAPY FILTER
         # ============================================================
@@ -1033,6 +1065,7 @@ def get_requests(
             doctor_name,
             request_territory,
             request_region,
+            doctor_division,
             visit_count
         ) in results:
 
@@ -1050,6 +1083,7 @@ def get_requests(
 
                 "doctor_id": request.doctor_id,
                 "doctor_name": doctor_name,
+                "division": doctor_division or "",
 
                 # ----------------------------------------------------
                 # Region / Territory
@@ -2133,7 +2167,7 @@ def get_planned_visits(
 
         # Query requests raised by BLs (case-insensitive check on requested_by_role)
         query = db.query(models.Request).filter(
-            func.upper(func.trim(models.Request.requested_by_role)) == "BL"
+            func.upper(func.trim(models.Request.requested_by_role)).in_(["BL", "BM", "BH", "SBUH", "BE"])
         )
 
         req_date_col = func.coalesce(models.Request.request_date, func.date(models.Request.created_at))
@@ -2316,12 +2350,28 @@ def get_tour_plan_meta(db: Session = Depends(get_db)):
         print(f"Error fetching tour plan metadata: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+DIVISION_TERRITORY_PREFIXES = {
+    "NUCLEUS": ["NUC-"],
+    "MAXIMUS": ["MAX-"],
+    "NUTRIUS": ["ZEN-", "NUT-"],
+    "GLADIUS": ["GLA-"],
+    "STIMULUS": ["STI-", "GLST-"],
+    "IMPETUS": ["IMP-"],
+    "GLAMUS": ["GLST-", "GLA-", "GLAM-"]
+}
+
+NON_TERRITORY_TOKENS = {
+    "BE", "BM", "BL", "DIR", "DIR-1", "DIR-2", "DIR-3", "PE", "NE", "TE", 
+    "HR", "GPM", "SPM", "MM", "PM", "MH", "AVP", "SBUH", "BH", "BT", "BRE", 
+    "TRAINEE EXECUTIVE", "KAE", "SBE", "ZE-PE", "ZE-SPM", "ADMIN-HR", "ADMIN", "DEFAULT"
+}
+
 @app.get("/api/tour-plans/territories")
 def get_tour_plan_territories(
     divisions: Optional[str] = Query(None, description="Comma-separated divisions"),
     db: Session = Depends(get_db)
 ):
-    """Returns distinct territories for selected divisions"""
+    """Returns distinct, cleaned territories for selected divisions"""
     try:
         if not divisions:
             return []
@@ -2340,18 +2390,145 @@ def get_tour_plan_territories(
             models.User.Territory.isnot(None)
         ).distinct().all()
 
+        doc_bl_terrs = db.query(models.Doctor.bl_territory).filter(
+            models.Doctor.division.in_(div_list),
+            models.Doctor.bl_territory.isnot(None)
+        ).distinct().all()
+
         all_terrs = set()
-        for (t,) in doc_terrs:
-            if t and t.strip():
-                all_terrs.add(t.strip())
-        for (t,) in user_terrs:
-            if t and t.strip():
-                all_terrs.add(t.strip())
+        for group in (doc_terrs, user_terrs, doc_bl_terrs):
+            for (t,) in group:
+                if t:
+                    cleaned = t.strip()
+                    cleaned_up = cleaned.upper()
+                    if (
+                        cleaned_up
+                        and cleaned_up not in NON_TERRITORY_TOKENS
+                        and len(cleaned) > 2
+                        and not cleaned_up.startswith("DIR-")
+                        and not cleaned_up.startswith("ADMIN")
+                    ):
+                        all_terrs.add(cleaned)
 
         return sorted(list(all_terrs))
     except Exception as e:
         print(f"Error fetching territories for divisions: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+def get_matching_bls_for_tour_plan(
+    db: Session,
+    divisions: List[str],
+    territories: List[str]
+) -> List[models.User]:
+    """
+    Finds ONLY the Business Leaders (BLs) that correspond to BOTH the selected divisions
+    AND selected territories.
+    """
+    if not divisions or not territories:
+        return []
+
+    norm_divs = [d.strip().upper() for d in divisions if d and d.strip()]
+    norm_terrs = [t.strip().upper() for t in territories if t and t.strip()]
+    if not norm_divs or not norm_terrs:
+        return []
+
+    # 1. Fetch BL candidates strictly within the selected divisions
+    bl_candidates = db.query(models.User).filter(
+        func.upper(func.trim(models.User.Role)) == "BL",
+        func.upper(func.trim(models.User.Division)).in_(norm_divs)
+    ).all()
+
+    if not bl_candidates:
+        return []
+
+    def get_territory_div(t: str) -> Optional[str]:
+        t_up = t.strip().upper()
+        for div, prefixes in DIVISION_TERRITORY_PREFIXES.items():
+            if any(t_up.startswith(p) for p in prefixes):
+                return div
+        return None
+
+    matched_bls = []
+    seen_ids = set()
+
+    for bl in bl_candidates:
+        if bl.id in seen_ids:
+            continue
+        bl_div = (bl.Division or "").strip().upper()
+        bl_terr = (bl.Territory or "").strip().upper()
+        bl_hq = (bl.HQ or "").strip().upper()
+        bl_base = bl_terr[:-3] if bl_terr.endswith("-BL") else bl_terr
+
+        # Filter territories relevant for this candidate BL's division:
+        # Either the territory has this division's prefix, or has no recognized division prefix (e.g. city name)
+        relevant_terrs = [
+            t for t in norm_terrs
+            if get_territory_div(t) is None or get_territory_div(t) == bl_div
+        ]
+        if not relevant_terrs:
+            continue
+
+        target_bl_identifiers = set(relevant_terrs)
+
+        # 2a. Doctor table mapping: doctor territory -> bl_territory within this division
+        doc_bl_terrs = db.query(models.Doctor.bl_territory).filter(
+            func.upper(func.trim(models.Doctor.division)) == bl_div,
+            func.upper(func.trim(models.Doctor.territory)).in_(relevant_terrs),
+            models.Doctor.bl_territory.isnot(None)
+        ).distinct().all()
+        for (bl_t,) in doc_bl_terrs:
+            if bl_t and bl_t.strip():
+                target_bl_identifiers.add(bl_t.strip().upper())
+
+        # 2b. User table mapping for BM: BM territory -> Area_Name (which is BL territory)
+        bm_bl_terrs = db.query(models.User.Area_Name).filter(
+            func.upper(func.trim(models.User.Role)) == "BM",
+            func.upper(func.trim(models.User.Division)) == bl_div,
+            func.upper(func.trim(models.User.Territory)).in_(relevant_terrs),
+            models.User.Area_Name.isnot(None)
+        ).distinct().all()
+        for (area,) in bm_bl_terrs:
+            if area and area.strip():
+                target_bl_identifiers.add(area.strip().upper())
+
+        # 2c. User table mapping for Field reps: Field territory -> BM Area_Name -> BL Area_Name
+        field_bm_terrs = db.query(models.User.Area_Name).filter(
+            func.upper(func.trim(models.User.Role)).in_(["BE", "MR", "FE", "TE", "NE", "PE", "SBE", "TRAINEE EXECUTIVE"]),
+            func.upper(func.trim(models.User.Division)) == bl_div,
+            func.upper(func.trim(models.User.Territory)).in_(relevant_terrs),
+            models.User.Area_Name.isnot(None)
+        ).distinct().all()
+        bm_names = [t[0].strip().upper() for t in field_bm_terrs if t[0] and t[0].strip()]
+        if bm_names:
+            bm_to_bl = db.query(models.User.Area_Name).filter(
+                func.upper(func.trim(models.User.Role)) == "BM",
+                func.upper(func.trim(models.User.Territory)).in_(bm_names),
+                models.User.Area_Name.isnot(None)
+            ).distinct().all()
+            for (area,) in bm_to_bl:
+                if area and area.strip():
+                    target_bl_identifiers.add(area.strip().upper())
+
+        # 3. Match candidate BL against target identifiers and HQ
+        is_match = False
+        if bl_terr and bl_terr in target_bl_identifiers:
+            is_match = True
+        elif bl_hq and bl_hq in target_bl_identifiers:
+            is_match = True
+        else:
+            for t in relevant_terrs:
+                if bl_base and (t == bl_base or t.startswith(bl_base + "-") or t.startswith(bl_base + "_")):
+                    is_match = True
+                    break
+                if bl_hq and (bl_hq == t or bl_hq in t or t.endswith("-" + bl_hq) or f"-{bl_hq}-" in t):
+                    is_match = True
+                    break
+
+        if is_match:
+            seen_ids.add(bl.id)
+            matched_bls.append(bl)
+
+    return matched_bls
 
 @app.post("/api/tour-plans")
 def create_tour_plan(
@@ -2372,6 +2549,12 @@ def create_tour_plan(
             raise HTTPException(
                 status_code=403,
                 detail="Access denied: Only Asst General Manager role can create a tour plan."
+            )
+
+        if plan.from_date < date.today():
+            raise HTTPException(
+                status_code=400,
+                detail="From Date cannot be in the past. Please select current or future date."
             )
 
         if plan.from_date > plan.to_date:
@@ -2404,8 +2587,50 @@ def create_tour_plan(
 
         month_val = plan.month or month_name[plan.from_date.month]
         year_val = plan.year or str(plan.from_date.year)
+
+        today = date.today()
+        month_list = list(month_name)
+        plan_year_num = None
+        try:
+            plan_year_num = int(year_val)
+        except (ValueError, TypeError):
+            pass
+
+        if plan_year_num is not None:
+            plan_month_num = month_list.index(month_val) if month_val in month_list else plan.from_date.month
+            if plan_year_num < today.year or (plan_year_num == today.year and plan_month_num < today.month):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Tour Plan Month and Year cannot be in the past. Please select current or future month and year."
+                )
         creator_name = current_user_name or plan.created_by or "Asst General Manager"
 
+        # 1. Resolve Assigned Scientific Officer User & Email
+        so_user = None
+        if plan.assigned_so_id:
+            so_user = db.query(models.User).filter(models.User.id == plan.assigned_so_id).first()
+        if not so_user and plan.assigned_so_code:
+            so_user = db.query(models.User).filter(models.User.Emp_Code == plan.assigned_so_code).first()
+        if not so_user and plan.assigned_so:
+            so_user = db.query(models.User).filter(
+                models.User.Role.in_(["MSL", "Scientific Officer"]),
+                models.User.Emp_Name == plan.assigned_so
+            ).first()
+
+        so_name = (so_user.Emp_Name if so_user else plan.assigned_so) or "Scientific Officer"
+        
+        target_so_email = None
+        if getattr(plan, "assigned_so_email", None) and plan.assigned_so_email.strip():
+            target_so_email = plan.assigned_so_email.strip()
+            # If so_user exists and has no email, save it permanently in User table
+            if so_user and (not so_user.email1 or not so_user.email1.strip()):
+                so_user.email1 = target_so_email
+                db.commit()
+                db.refresh(so_user)
+        elif so_user and so_user.email1 and so_user.email1.strip():
+            target_so_email = so_user.email1.strip()
+
+        # 2. Persist Tour Plan Record
         db_plan = models.TourPlan(
             from_date=plan.from_date,
             to_date=plan.to_date,
@@ -2416,6 +2641,7 @@ def create_tour_plan(
             assigned_so=plan.assigned_so,
             assigned_so_id=plan.assigned_so_id,
             assigned_so_code=plan.assigned_so_code,
+            assigned_so_email=target_so_email,
             created_by=creator_name,
             created_by_emp_code=plan.created_by_emp_code,
             created_by_role=caller_role,
@@ -2426,7 +2652,7 @@ def create_tour_plan(
         db.commit()
         db.refresh(db_plan)
 
-        # Trigger Email Notifications
+        # 3. Trigger Email Notifications
         email_summary = {
             "scientific_officer": None,
             "business_leaders": []
@@ -2440,62 +2666,57 @@ def create_tour_plan(
             "divisions": plan.divisions,
             "territories": plan.territories,
             "assigned_so": plan.assigned_so,
+            "assigned_so_email": target_so_email,
             "remarks": plan.remarks
         }
 
-        # 1. Email to Assigned Scientific Officer
-        so_user = db.query(models.User).filter(
-            models.User.Role.in_(["MSL", "Scientific Officer"]),
-            or_(
-                models.User.Emp_Name == plan.assigned_so,
-                models.User.Emp_Code == plan.assigned_so_code,
-                models.User.id == plan.assigned_so_id
-            )
-        ).first()
-
-        if so_user and so_user.email1 and so_user.email1.strip():
-            so_email = so_user.email1.strip()
+        # 3a. Email to Assigned Scientific Officer
+        if target_so_email:
             so_subject = f"New Tour Plan Assigned ({plan.from_date} to {plan.to_date}) | Pulse Scientific Office"
             so_html = build_tour_plan_email_html(
-                recipient_name=so_user.Emp_Name or plan.assigned_so,
+                recipient_name=so_name,
                 recipient_role="Scientific Officer",
                 is_so=True,
                 plan_data=plan_dict,
                 created_by_name=creator_name
             )
-            res = send_email(to_email=so_email, subject=so_subject, html_content=so_html)
-            email_summary["scientific_officer"] = {
-                "name": so_user.Emp_Name,
-                "email": so_email,
-                "status": "sent" if res.get("success") else "failed"
-            }
-        else:
-            so_name = so_user.Emp_Name if so_user else plan.assigned_so
+            res = send_email(to_email=target_so_email, subject=so_subject, html_content=so_html)
             email_summary["scientific_officer"] = {
                 "name": so_name,
+                "role": "Scientific Officer",
+                "email": target_so_email,
+                "status": "sent" if res.get("success") else "failed",
+                "simulated": res.get("simulated", False),
+                "error": res.get("error") if not res.get("success") else None
+            }
+        else:
+            email_summary["scientific_officer"] = {
+                "name": so_name,
+                "role": "Scientific Officer",
                 "email": None,
-                "status": "skipped (no email registered)"
+                "status": "not_sent",
+                "reason": "No email address registered for this Scientific Officer"
             }
 
-        # 2. Email to Business Leaders (BLs) of target divisions
-        bl_users = db.query(models.User).filter(
-            models.User.Role == "BL",
-            or_(
-                models.User.Division.in_(plan.divisions),
-                models.User.Territory.in_(plan.territories)
-            )
-        ).all()
+        # 3b. Email ONLY to Business Leaders (BLs) matching selected division and territories
+        bl_users = get_matching_bls_for_tour_plan(
+            db=db,
+            divisions=plan.divisions,
+            territories=plan.territories
+        )
 
         seen_emails = set()
         for bl in bl_users:
             bl_email = (bl.email1 or "").strip()
             bl_name = bl.Emp_Name or bl.Territory or "Business Leader"
+            bl_div = bl.Division or ""
+            bl_terr = bl.Territory or ""
             if bl_email and bl_email not in seen_emails:
                 seen_emails.add(bl_email)
-                bl_subject = f"Tour Plan Notification: {bl.Division or 'Division'} ({plan.from_date} to {plan.to_date}) | Pulse Scientific Office"
+                bl_subject = f"Tour Plan Notification: {bl_div or 'Division'} ({plan.from_date} to {plan.to_date}) | Pulse Scientific Office"
                 bl_html = build_tour_plan_email_html(
                     recipient_name=bl_name,
-                    recipient_role=f"Business Leader ({bl.Division or ''})",
+                    recipient_role=f"Business Leader ({bl_div})",
                     is_so=False,
                     plan_data=plan_dict,
                     created_by_name=creator_name
@@ -2503,17 +2724,47 @@ def create_tour_plan(
                 res = send_email(to_email=bl_email, subject=bl_subject, html_content=bl_html)
                 email_summary["business_leaders"].append({
                     "name": bl_name,
+                    "role": f"Business Leader ({bl_div})" if bl_div else "Business Leader",
                     "email": bl_email,
-                    "division": bl.Division,
-                    "status": "sent" if res.get("success") else "failed"
+                    "division": bl_div,
+                    "territory": bl_terr,
+                    "status": "sent" if res.get("success") else "failed",
+                    "simulated": res.get("simulated", False),
+                    "error": res.get("error") if not res.get("success") else None
                 })
             elif not bl_email:
                 email_summary["business_leaders"].append({
                     "name": bl_name,
+                    "role": f"Business Leader ({bl_div})" if bl_div else "Business Leader",
                     "email": None,
-                    "division": bl.Division,
-                    "status": "skipped (no email registered)"
+                    "division": bl_div,
+                    "territory": bl_terr,
+                    "status": "not_sent",
+                    "reason": "No email address registered"
                 })
+
+        # Calculate delivery stats
+        so_status = email_summary["scientific_officer"]["status"] if email_summary["scientific_officer"] else "not_sent"
+        bl_sent_count = len([b for b in email_summary["business_leaders"] if b["status"] == "sent"])
+        bl_failed_count = len([b for b in email_summary["business_leaders"] if b["status"] == "failed"])
+        bl_skipped_count = len([b for b in email_summary["business_leaders"] if b["status"] == "not_sent"])
+        total_recipients = (1 if email_summary["scientific_officer"] else 0) + len(email_summary["business_leaders"])
+        total_sent = (1 if so_status == "sent" else 0) + bl_sent_count
+
+        email_summary["stats"] = {
+            "total_recipients": total_recipients,
+            "total_sent": total_sent,
+            "total_failed": (1 if so_status == "failed" else 0) + bl_failed_count,
+            "total_skipped": (1 if so_status == "not_sent" else 0) + bl_skipped_count,
+            "so_sent": so_status == "sent",
+            "bl_sent_count": bl_sent_count,
+            "bl_total_count": len(email_summary["business_leaders"])
+        }
+
+        # Persist email_status in tour_plans record
+        db_plan.email_status = json.dumps(email_summary)
+        db.commit()
+        db.refresh(db_plan)
 
         return {
             "message": "Tour plan created successfully and notifications triggered",
@@ -2526,10 +2777,14 @@ def create_tour_plan(
                 "divisions": plan.divisions,
                 "territories": plan.territories,
                 "assigned_so": db_plan.assigned_so,
+                "assigned_so_id": db_plan.assigned_so_id,
+                "assigned_so_code": db_plan.assigned_so_code,
+                "assigned_so_email": db_plan.assigned_so_email,
                 "created_by": db_plan.created_by,
                 "created_by_role": db_plan.created_by_role,
                 "status": db_plan.status,
                 "remarks": db_plan.remarks,
+                "email_status": email_summary,
                 "created_at": db_plan.created_at
             },
             "emails_triggered": email_summary
@@ -2618,12 +2873,45 @@ def get_tour_plans(
                 if not matches_so:
                     continue
             elif user_role == "BL":
-                # Visibility only if BL's division or territory matches
+                # Visibility if BL's division AND territory matches, or if BL was notified in email_status
                 matches_bl = False
-                if bl_division and any(d.lower() == bl_division.lower() for d in p_divs):
-                    matches_bl = True
-                if bl_territory and any(t.lower() == bl_territory.lower() for t in p_terrs):
-                    matches_bl = True
+                p_email_status = json.loads(p.email_status) if getattr(p, 'email_status', None) else None
+                if p_email_status and isinstance(p_email_status.get("business_leaders"), list):
+                    for bl_entry in p_email_status["business_leaders"]:
+                        if username and bl_entry.get("name") and bl_entry["name"].strip().lower() == username.strip().lower():
+                            matches_bl = True
+                            break
+                        if bl_user and bl_user.email1 and bl_entry.get("email") and bl_entry["email"].strip().lower() == bl_user.email1.strip().lower():
+                            matches_bl = True
+                            break
+                        if bl_territory and bl_entry.get("territory") and bl_entry["territory"].strip().upper() == bl_territory.strip().upper():
+                            matches_bl = True
+                            break
+
+                if not matches_bl:
+                    div_matches = bl_division and any(d.strip().lower() == bl_division.strip().lower() for d in p_divs)
+                    if div_matches:
+                        if bl_territory:
+                            bl_terr_upper = bl_territory.strip().upper()
+                            bl_base = bl_terr_upper[:-3] if bl_terr_upper.endswith('-BL') else bl_terr_upper
+                            for t in p_terrs:
+                                t_upper = t.strip().upper()
+                                if t_upper == bl_terr_upper or t_upper == bl_base or t_upper.startswith(bl_base + '-') or t_upper.startswith(bl_base + '_'):
+                                    matches_bl = True
+                                    break
+                                if bl_user and bl_user.HQ and bl_user.HQ.strip().upper() in t_upper:
+                                    matches_bl = True
+                                    break
+                            if not matches_bl:
+                                doc_match = db.query(models.Doctor.id).filter(
+                                    func.upper(func.trim(models.Doctor.division)) == bl_division.strip().upper(),
+                                    func.upper(func.trim(models.Doctor.bl_territory)) == bl_terr_upper,
+                                    func.upper(func.trim(models.Doctor.territory)).in_([t.strip().upper() for t in p_terrs])
+                                ).first()
+                                if doc_match:
+                                    matches_bl = True
+                        else:
+                            matches_bl = True
                 if not matches_bl:
                     continue
             else:
@@ -2641,11 +2929,13 @@ def get_tour_plans(
                 "assigned_so": p.assigned_so,
                 "assigned_so_id": p.assigned_so_id,
                 "assigned_so_code": p.assigned_so_code,
+                "assigned_so_email": getattr(p, "assigned_so_email", None),
                 "created_by": p.created_by,
                 "created_by_emp_code": p.created_by_emp_code,
                 "created_by_role": p.created_by_role,
                 "status": p.status,
                 "remarks": p.remarks,
+                "email_status": json.loads(p.email_status) if getattr(p, 'email_status', None) else None,
                 "created_at": p.created_at,
                 "updated_at": p.updated_at
             })
