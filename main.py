@@ -7,7 +7,7 @@ load_dotenv()
 from fastapi import FastAPI, Depends, HTTPException, Query, Body, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import extract, func, cast, String
+from sqlalchemy import extract, func, cast, String, distinct
 from typing import List, Optional
 from datetime import date, datetime, timedelta
 from calendar import month_name
@@ -170,8 +170,6 @@ def get_brands(
 
     if division:
         print("Filtering by:", division)
-        query = query.filter(models.Brand.divisionname == division)
-
     brands = query.all()
 
     print("Returned:", len(brands))
@@ -2918,6 +2916,64 @@ def get_tour_plans(
                 if bl_division and not any(d.lower() == bl_division.lower() for d in p_divs):
                     continue
 
+            # Calculate assigned doctors count for this tour plan:
+            # Doctors assigned with requests within the plan date range for the selected divisions and territories
+            assigned_docs_count = 0
+            total_master_docs_count = 0
+            territory_doc_counts = {}
+            division_doc_counts = {}
+
+            if p_divs and p_terrs and p.from_date and p.to_date:
+                try:
+                    norm_divs = [d.strip().upper() for d in p_divs if d.strip()]
+                    norm_terrs = [t.strip().upper() for t in p_terrs if t.strip()]
+
+                    # Distinct doctors who have requests in this date range
+                    assigned_docs_count = db.query(func.count(distinct(models.Request.doctor_id))).join(
+                        models.Doctor, models.Request.doctor_id == models.Doctor.id
+                    ).filter(
+                        func.upper(func.trim(models.Doctor.division)).in_(norm_divs),
+                        func.upper(func.trim(models.Doctor.territory)).in_(norm_terrs),
+                        models.Request.request_date >= p.from_date,
+                        models.Request.request_date <= p.to_date
+                    ).scalar() or 0
+
+                    # Total doctors in master database for these divisions and territories
+                    total_master_docs_count = db.query(func.count(models.Doctor.id)).filter(
+                        func.upper(func.trim(models.Doctor.division)).in_(norm_divs),
+                        func.upper(func.trim(models.Doctor.territory)).in_(norm_terrs)
+                    ).scalar() or 0
+
+                    # Breakdown by territory (assigned doctors with requests in date range)
+                    terr_counts = db.query(
+                        func.upper(func.trim(models.Doctor.territory)),
+                        func.count(distinct(models.Request.doctor_id))
+                    ).join(
+                        models.Doctor, models.Request.doctor_id == models.Doctor.id
+                    ).filter(
+                        func.upper(func.trim(models.Doctor.division)).in_(norm_divs),
+                        func.upper(func.trim(models.Doctor.territory)).in_(norm_terrs),
+                        models.Request.request_date >= p.from_date,
+                        models.Request.request_date <= p.to_date
+                    ).group_by(func.upper(func.trim(models.Doctor.territory))).all()
+                    territory_doc_counts = {t[0]: t[1] for t in terr_counts}
+
+                    # Breakdown by division
+                    div_counts = db.query(
+                        func.upper(func.trim(models.Doctor.division)),
+                        func.count(distinct(models.Request.doctor_id))
+                    ).join(
+                        models.Doctor, models.Request.doctor_id == models.Doctor.id
+                    ).filter(
+                        func.upper(func.trim(models.Doctor.division)).in_(norm_divs),
+                        func.upper(func.trim(models.Doctor.territory)).in_(norm_terrs),
+                        models.Request.request_date >= p.from_date,
+                        models.Request.request_date <= p.to_date
+                    ).group_by(func.upper(func.trim(models.Doctor.division))).all()
+                    division_doc_counts = {d[0]: d[1] for d in div_counts}
+                except Exception as cnt_err:
+                    print(f"Error calculating doctor counts for plan {p.id}: {cnt_err}")
+
             result.append({
                 "id": p.id,
                 "from_date": p.from_date,
@@ -2935,6 +2991,10 @@ def get_tour_plans(
                 "created_by_role": p.created_by_role,
                 "status": p.status,
                 "remarks": p.remarks,
+                "assigned_doctors_count": assigned_docs_count,
+                "total_doctors_count": total_master_docs_count,
+                "territory_doctor_counts": territory_doc_counts,
+                "division_doctor_counts": division_doc_counts,
                 "email_status": json.loads(p.email_status) if getattr(p, 'email_status', None) else None,
                 "created_at": p.created_at,
                 "updated_at": p.updated_at
@@ -2947,6 +3007,100 @@ def get_tour_plans(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/tour-plans/{plan_id}")
+def get_tour_plan_detail(
+    plan_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Get detailed tour plan with assigned doctor requests and territory breakdowns.
+    """
+    import json
+    plan = db.query(models.TourPlan).filter(models.TourPlan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Tour plan not found")
+
+    try:
+        p_divs = json.loads(plan.divisions) if plan.divisions else []
+    except Exception:
+        p_divs = [d.strip() for d in plan.divisions.split(",") if d.strip()]
+
+    try:
+        p_terrs = json.loads(plan.territories) if plan.territories else []
+    except Exception:
+        p_terrs = [t.strip() for t in plan.territories.split(",") if t.strip()]
+
+    norm_divs = [d.strip().upper() for d in p_divs if d.strip()]
+    norm_terrs = [t.strip().upper() for t in p_terrs if t.strip()]
+
+    # Query assigned doctor requests within date range and matching divisions/territories
+    assigned_requests = []
+    if norm_divs and norm_terrs and plan.from_date and plan.to_date:
+        reqs = db.query(models.Request).join(
+            models.Doctor, models.Request.doctor_id == models.Doctor.id
+        ).filter(
+            func.upper(func.trim(models.Doctor.division)).in_(norm_divs),
+            func.upper(func.trim(models.Doctor.territory)).in_(norm_terrs),
+            models.Request.request_date >= plan.from_date,
+            models.Request.request_date <= plan.to_date
+        ).order_by(models.Request.request_date.asc(), models.Doctor.name.asc()).all()
+
+        for r in reqs:
+            doc = r.doctor
+            assigned_requests.append({
+                "request_id": r.id,
+                "doctor_id": r.doctor_id,
+                "doctor_name": doc.name if doc else "N/A",
+                "speciality": doc.speciality if doc else "",
+                "division": doc.division if doc else "",
+                "territory": doc.territory if doc else "",
+                "patch": getattr(doc, "patch", "") if doc else "",
+                "is_priority_doctor": getattr(doc, "is_priority_doctor", False) if doc else False,
+                "mr_name": getattr(doc, "emp_name", "") if doc else "",
+                "request_date": r.request_date.isoformat() if r.request_date else None,
+                "requested_by": r.requested_by,
+                "requested_by_role": r.requested_by_role,
+                "brand": r.brand,
+                "brand2": r.brand2,
+                "objective": r.objective,
+                "expected_outcome": r.expected_outcome,
+                "priority": r.priority,
+                "request_status": r.request_status,
+                "assigned_msl": r.assigned_msl
+            })
+
+    # Summary statistics
+    total_assigned_doctors = len(set(r["doctor_id"] for r in assigned_requests))
+    total_master_docs = db.query(func.count(models.Doctor.id)).filter(
+        func.upper(func.trim(models.Doctor.division)).in_(norm_divs),
+        func.upper(func.trim(models.Doctor.territory)).in_(norm_terrs)
+    ).scalar() or 0
+
+    return {
+        "id": plan.id,
+        "from_date": plan.from_date,
+        "to_date": plan.to_date,
+        "month": plan.month,
+        "year": plan.year,
+        "divisions": p_divs,
+        "territories": p_terrs,
+        "assigned_so": plan.assigned_so,
+        "assigned_so_id": plan.assigned_so_id,
+        "assigned_so_code": plan.assigned_so_code,
+        "assigned_so_email": getattr(plan, "assigned_so_email", None),
+        "created_by": plan.created_by,
+        "created_by_emp_code": plan.created_by_emp_code,
+        "created_by_role": plan.created_by_role,
+        "status": plan.status,
+        "remarks": plan.remarks,
+        "email_status": json.loads(plan.email_status) if getattr(plan, "email_status", None) else None,
+        "created_at": plan.created_at,
+        "updated_at": plan.updated_at,
+        "assigned_doctors_count": total_assigned_doctors,
+        "total_doctors_count": total_master_docs,
+        "assigned_requests": assigned_requests
+    }
 
 @app.delete("/api/tour-plans/{plan_id}")
 def delete_tour_plan(
