@@ -886,7 +886,7 @@ def get_requests(
         ).subquery()
 
         # ============================================================
-        # 2. DOCTOR NAME SUBQUERY
+        # 2. DOCTOR NAME & DIVISION RESOLUTION
         # Check logged activity first, then fallback to Doctor table
         # ============================================================
 
@@ -898,25 +898,7 @@ def get_requests(
             models.DoctorInteraction.doctor_name != ""
         ).order_by(models.DoctorInteraction.id.desc()).limit(1).scalar_subquery()
 
-        doctor_table_subq = db.query(
-            models.Doctor.name
-        ).filter(
-            or_(
-                models.Doctor.id == models.Request.doctor_id,
-                models.Doctor.doctor_id_ext == cast(models.Request.doctor_id, String)
-            )
-        ).limit(1).scalar_subquery()
-
-        doctor_name_subq = func.coalesce(interaction_doc_subq, doctor_table_subq)
-
-        doctor_div_subq = db.query(
-            models.Doctor.division
-        ).filter(
-            or_(
-                models.Doctor.id == models.Request.doctor_id,
-                models.Doctor.doctor_id_ext == cast(models.Request.doctor_id, String)
-            )
-        ).limit(1).scalar_subquery()
+        doctor_name_expr = func.coalesce(interaction_doc_subq, models.Doctor.name)
 
         # ============================================================
         # 3. MAIN QUERY
@@ -925,19 +907,22 @@ def get_requests(
         query = db.query(
             models.Request,
 
-            # Doctor name resolved separately
-            doctor_name_subq.label("doctor_name"),
+            # Doctor name resolved from interaction or joined doctor record
+            doctor_name_expr.label("doctor_name"),
 
             # Use values stored in requests
             models.Request.territory.label("request_territory"),
             models.Request.region.label("request_region"),
-            doctor_div_subq.label("doctor_division"),
+            models.Doctor.division.label("doctor_division"),
 
             # Visit count
             interaction_count_subq.c.visit_count
         ).outerjoin(
             interaction_count_subq,
             models.Request.id == interaction_count_subq.c.request_id
+        ).outerjoin(
+            models.Doctor,
+            models.Request.doctor_id == models.Doctor.id
         )
 
         # ============================================================
@@ -975,16 +960,10 @@ def get_requests(
 
             query = query.filter(
                 or_(
+                    models.Doctor.name.ilike(search_pattern),
                     db.query(models.DoctorInteraction.id).filter(
                         models.DoctorInteraction.request_id == models.Request.id,
                         models.DoctorInteraction.doctor_name.ilike(search_pattern)
-                    ).exists(),
-                    db.query(models.Doctor.id).filter(
-                        or_(
-                            models.Doctor.id == models.Request.doctor_id,
-                            models.Doctor.doctor_id_ext == cast(models.Request.doctor_id, String)
-                        ),
-                        models.Doctor.name.ilike(search_pattern)
                     ).exists()
                 )
             )
@@ -1015,13 +994,7 @@ def get_requests(
 
         if division:
             query = query.filter(
-                db.query(models.Doctor.id).filter(
-                    or_(
-                        models.Doctor.id == models.Request.doctor_id,
-                        models.Doctor.doctor_id_ext == cast(models.Request.doctor_id, String)
-                    ),
-                    func.upper(func.trim(models.Doctor.division)) == division.strip().upper()
-                ).exists()
+                func.upper(func.trim(models.Doctor.division)) == division.strip().upper()
             )
 
         # ============================================================
