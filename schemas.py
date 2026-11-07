@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Union
 from datetime import datetime, date
 
 # Doctor Schemas
@@ -116,7 +116,7 @@ class RequestBulkAssign(BaseModel):
 
 # Request Schemas
 class RequestBase(BaseModel):
-    doctor_id: int
+    doctor_id: Union[int, str]
     request_date: Optional[date] = None
     brand: Optional[str] = None
     objective: Optional[str] = None
@@ -152,7 +152,7 @@ class Request(RequestBase):
 
 class RequestSummary(BaseModel):
     id: int
-    doctor_id: int
+    doctor_id: Union[int, str]
     request_date: Optional[date] = None
     requested_by: str
     requested_by_role: str
@@ -173,6 +173,7 @@ class RequestSummary(BaseModel):
     rx_status_brand2: Optional[str] = None
     created_at: datetime
     doctor_name: Optional[str] = None
+    division: Optional[str] = None
     territory: Optional[str] = None  # From doctor relationship
     region: Optional[str] = None     # From doctor relationship
     therapy_area: Optional[str] = None  # From doctor relationship

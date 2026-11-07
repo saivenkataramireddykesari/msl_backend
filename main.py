@@ -767,17 +767,23 @@ def create_request(request: schemas.RequestCreate, db: Session = Depends(get_db)
     print(f"DEBUG - Doctor ID: {request.doctor_id}")
     
     # Verify doctor exists
-    doctor = db.query(models.Doctor).filter(models.Doctor.id == request.doctor_id).first()
+    doc_id_str = str(request.doctor_id).strip()
+    doctor = db.query(models.Doctor).filter(
+        or_(
+            models.Doctor.doctor_id_ext == doc_id_str,
+            models.Doctor.id == request.doctor_id
+        )
+    ).first()
     if not doctor:
         print(f"DEBUG - Doctor not found for ID: {request.doctor_id}")
         raise HTTPException(status_code=404, detail="Doctor not found")
     
-    print(f"DEBUG - Doctor found: {doctor.name}")
+    print(f"DEBUG - Doctor found: {doctor.name} (doctor_id_ext={doctor.doctor_id_ext})")
 
     try:
-        # Create request with explicit field assignment
+        # Create request with explicit field assignment - use doctor_id_ext for mapping
         db_request = models.Request(
-            doctor_id=request.doctor_id,
+            doctor_id=str(doctor.doctor_id_ext or doctor.id),
             request_date=request.request_date or date.today(),
             territory=doctor.territory,
             region=doctor.region,
@@ -922,7 +928,10 @@ def get_requests(
             models.Request.id == interaction_count_subq.c.request_id
         ).outerjoin(
             models.Doctor,
-            models.Request.doctor_id == models.Doctor.id
+            or_(
+                models.Request.doctor_id == models.Doctor.doctor_id_ext,
+                cast(models.Request.doctor_id, String) == cast(models.Doctor.id, String)
+            )
         )
 
         # ============================================================
@@ -1389,7 +1398,12 @@ def update_request_user_classification(
         request.user_classification = user_classification
         
         # Sync to doctor profile - update the doctor's priority status based on classification
-        doctor = db.query(models.Doctor).filter(models.Doctor.id == request.doctor_id).first()
+        doctor = db.query(models.Doctor).filter(
+            or_(
+                models.Doctor.doctor_id_ext == str(request.doctor_id),
+                cast(models.Doctor.id, String) == str(request.doctor_id)
+            )
+        ).first()
         if doctor:
             if user_classification == "potential":
                 doctor.is_priority_doctor = True
@@ -2903,7 +2917,7 @@ def get_tour_plans(
 
                     # Distinct doctors who have requests in this date range
                     assigned_docs_count = db.query(func.count(distinct(models.Request.doctor_id))).join(
-                        models.Doctor, models.Request.doctor_id == models.Doctor.id
+                        models.Doctor, or_(models.Request.doctor_id == models.Doctor.doctor_id_ext, cast(models.Request.doctor_id, String) == cast(models.Doctor.id, String))
                     ).filter(
                         func.upper(func.trim(models.Doctor.division)).in_(norm_divs),
                         func.upper(func.trim(models.Doctor.territory)).in_(norm_terrs),
@@ -2922,7 +2936,7 @@ def get_tour_plans(
                         func.upper(func.trim(models.Doctor.territory)),
                         func.count(distinct(models.Request.doctor_id))
                     ).join(
-                        models.Doctor, models.Request.doctor_id == models.Doctor.id
+                        models.Doctor, or_(models.Request.doctor_id == models.Doctor.doctor_id_ext, cast(models.Request.doctor_id, String) == cast(models.Doctor.id, String))
                     ).filter(
                         func.upper(func.trim(models.Doctor.division)).in_(norm_divs),
                         func.upper(func.trim(models.Doctor.territory)).in_(norm_terrs),
@@ -2936,7 +2950,7 @@ def get_tour_plans(
                         func.upper(func.trim(models.Doctor.division)),
                         func.count(distinct(models.Request.doctor_id))
                     ).join(
-                        models.Doctor, models.Request.doctor_id == models.Doctor.id
+                        models.Doctor, or_(models.Request.doctor_id == models.Doctor.doctor_id_ext, cast(models.Request.doctor_id, String) == cast(models.Doctor.id, String))
                     ).filter(
                         func.upper(func.trim(models.Doctor.division)).in_(norm_divs),
                         func.upper(func.trim(models.Doctor.territory)).in_(norm_terrs),
@@ -3011,7 +3025,7 @@ def get_tour_plan_detail(
     assigned_requests = []
     if norm_divs and norm_terrs and plan.from_date and plan.to_date:
         reqs = db.query(models.Request).join(
-            models.Doctor, models.Request.doctor_id == models.Doctor.id
+            models.Doctor, or_(models.Request.doctor_id == models.Doctor.doctor_id_ext, cast(models.Request.doctor_id, String) == cast(models.Doctor.id, String))
         ).filter(
             func.upper(func.trim(models.Doctor.division)).in_(norm_divs),
             func.upper(func.trim(models.Doctor.territory)).in_(norm_terrs),

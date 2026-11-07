@@ -1,5 +1,5 @@
 from sqlalchemy import Column, Integer, Float, String, DateTime, Text, Boolean, ForeignKey, Date
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, foreign
 from database import Base
 from datetime import datetime
 
@@ -45,13 +45,17 @@ class Doctor(Base):
     sbuh_territory = Column(String(255), nullable=True)   # SBUH_Territory
     
     # Relationship
-    requests = relationship("Request", back_populates="doctor")
+    requests = relationship(
+        "Request",
+        primaryjoin="foreign(Request.doctor_id) == Doctor.doctor_id_ext",
+        back_populates="doctor"
+    )
 
 class Request(Base):
     __tablename__ = "requests"
     
     id = Column(Integer, primary_key=True, index=True)
-    doctor_id = Column(Integer, ForeignKey("doctors.id"), nullable=False)
+    doctor_id = Column(String(100), nullable=False)
     requested_by = Column(String(100), nullable=False)
     requested_by_role = Column(String(50), nullable=False)
     brand = Column(String(255), nullable=True)
@@ -79,7 +83,12 @@ class Request(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationships
-    doctor = relationship("Doctor", back_populates="requests")
+    doctor = relationship(
+        "Doctor",
+        primaryjoin="foreign(Request.doctor_id) == Doctor.doctor_id_ext",
+        uselist=False,
+        back_populates="requests"
+    )
     doctor_interactions = relationship("DoctorInteraction", back_populates="request", cascade="all, delete-orphan")
     assignment_logs = relationship("RequestAssignmentLog", back_populates="request", cascade="all, delete-orphan")
 
