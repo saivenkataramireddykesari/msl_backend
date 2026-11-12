@@ -46,17 +46,15 @@ with engine.connect() as conn:
 app = FastAPI(title="Scientific Officer Management System")
 
 # CORS middleware — allow all origins for dev compatibility
-# Load CORS_ORIGINS from environment, fallback to a default list if not set
-# CORS_ORIGINS_STR = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000,https://msl-frontend.netlify.app,https://so.pulsepharma.net")
-# CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_STR.split(',')]
+CORS_ORIGINS_STR = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173,http://127.0.0.1:3000,https://msl-frontend.netlify.app,https://so.pulsepharma.net"
+)
+CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_STR.split(",") if origin.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-     allow_origins=[
-        "https://so.pulsepharma.net",
-        "http://localhost:5173",
-        "http://localhost:3000",
-    ],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -2638,113 +2636,126 @@ def create_tour_plan(
         db.refresh(db_plan)
 
         # 3. Trigger Email Notifications
+        # NOTE: Tour plan email sending is commented out for now.
+        # Uncomment the block below when ready to re-enable email sending.
         email_summary = {
             "scientific_officer": None,
-            "business_leaders": []
-        }
-
-        plan_dict = {
-            "from_date": plan.from_date,
-            "to_date": plan.to_date,
-            "month": month_val,
-            "year": year_val,
-            "divisions": plan.divisions,
-            "territories": plan.territories,
-            "assigned_so": plan.assigned_so,
-            "assigned_so_email": target_so_email,
-            "remarks": plan.remarks
-        }
-
-        # 3a. Email to Assigned Scientific Officer
-        if target_so_email:
-            so_subject = f"New Tour Plan Assigned ({plan.from_date} to {plan.to_date}) | Pulse Scientific Office"
-            so_html = build_tour_plan_email_html(
-                recipient_name=so_name,
-                recipient_role="Scientific Officer",
-                is_so=True,
-                plan_data=plan_dict,
-                created_by_name=creator_name
-            )
-            res = send_email(to_email=target_so_email, subject=so_subject, html_content=so_html)
-            email_summary["scientific_officer"] = {
-                "name": so_name,
-                "role": "Scientific Officer",
-                "email": target_so_email,
-                "status": "sent" if res.get("success") else "failed",
-                "simulated": res.get("simulated", False),
-                "error": res.get("error") if not res.get("success") else None
+            "business_leaders": [],
+            "stats": {
+                "total_recipients": 0,
+                "total_sent": 0,
+                "total_failed": 0,
+                "total_skipped": 0,
+                "so_sent": False,
+                "bl_sent_count": 0,
+                "bl_total_count": 0
             }
-        else:
-            email_summary["scientific_officer"] = {
-                "name": so_name,
-                "role": "Scientific Officer",
-                "email": None,
-                "status": "not_sent",
-                "reason": "No email address registered for this Scientific Officer"
-            }
-
-        # 3b. Email ONLY to Business Leaders (BLs) matching selected division and territories
-        bl_users = get_matching_bls_for_tour_plan(
-            db=db,
-            divisions=plan.divisions,
-            territories=plan.territories
-        )
-
-        seen_emails = set()
-        for bl in bl_users:
-            bl_email = (bl.email1 or "").strip()
-            bl_name = bl.Emp_Name or bl.Territory or "Business Leader"
-            bl_div = bl.Division or ""
-            bl_terr = bl.Territory or ""
-            if bl_email and bl_email not in seen_emails:
-                seen_emails.add(bl_email)
-                bl_subject = f"Tour Plan Notification: {bl_div or 'Division'} ({plan.from_date} to {plan.to_date}) | Pulse Scientific Office"
-                bl_html = build_tour_plan_email_html(
-                    recipient_name=bl_name,
-                    recipient_role=f"Business Leader ({bl_div})",
-                    is_so=False,
-                    plan_data=plan_dict,
-                    created_by_name=creator_name
-                )
-                res = send_email(to_email=bl_email, subject=bl_subject, html_content=bl_html)
-                email_summary["business_leaders"].append({
-                    "name": bl_name,
-                    "role": f"Business Leader ({bl_div})" if bl_div else "Business Leader",
-                    "email": bl_email,
-                    "division": bl_div,
-                    "territory": bl_terr,
-                    "status": "sent" if res.get("success") else "failed",
-                    "simulated": res.get("simulated", False),
-                    "error": res.get("error") if not res.get("success") else None
-                })
-            elif not bl_email:
-                email_summary["business_leaders"].append({
-                    "name": bl_name,
-                    "role": f"Business Leader ({bl_div})" if bl_div else "Business Leader",
-                    "email": None,
-                    "division": bl_div,
-                    "territory": bl_terr,
-                    "status": "not_sent",
-                    "reason": "No email address registered"
-                })
-
-        # Calculate delivery stats
-        so_status = email_summary["scientific_officer"]["status"] if email_summary["scientific_officer"] else "not_sent"
-        bl_sent_count = len([b for b in email_summary["business_leaders"] if b["status"] == "sent"])
-        bl_failed_count = len([b for b in email_summary["business_leaders"] if b["status"] == "failed"])
-        bl_skipped_count = len([b for b in email_summary["business_leaders"] if b["status"] == "not_sent"])
-        total_recipients = (1 if email_summary["scientific_officer"] else 0) + len(email_summary["business_leaders"])
-        total_sent = (1 if so_status == "sent" else 0) + bl_sent_count
-
-        email_summary["stats"] = {
-            "total_recipients": total_recipients,
-            "total_sent": total_sent,
-            "total_failed": (1 if so_status == "failed" else 0) + bl_failed_count,
-            "total_skipped": (1 if so_status == "not_sent" else 0) + bl_skipped_count,
-            "so_sent": so_status == "sent",
-            "bl_sent_count": bl_sent_count,
-            "bl_total_count": len(email_summary["business_leaders"])
         }
+
+        # ==================== BEGIN TOUR PLAN EMAIL SENDING (COMMENTED OUT) ====================
+        # plan_dict = {
+        #     "from_date": plan.from_date,
+        #     "to_date": plan.to_date,
+        #     "month": month_val,
+        #     "year": year_val,
+        #     "divisions": plan.divisions,
+        #     "territories": plan.territories,
+        #     "assigned_so": plan.assigned_so,
+        #     "assigned_so_email": target_so_email,
+        #     "remarks": plan.remarks
+        # }
+        # 
+        # # 3a. Email to Assigned Scientific Officer
+        # if target_so_email:
+        #     so_subject = f"New Tour Plan Assigned ({plan.from_date} to {plan.to_date}) | Pulse Scientific Office"
+        #     so_html = build_tour_plan_email_html(
+        #         recipient_name=so_name,
+        #         recipient_role="Scientific Officer",
+        #         is_so=True,
+        #         plan_data=plan_dict,
+        #         created_by_name=creator_name
+        #     )
+        #     res = send_email(to_email=target_so_email, subject=so_subject, html_content=so_html)
+        #     email_summary["scientific_officer"] = {
+        #         "name": so_name,
+        #         "role": "Scientific Officer",
+        #         "email": target_so_email,
+        #         "status": "sent" if res.get("success") else "failed",
+        #         "simulated": res.get("simulated", False),
+        #         "error": res.get("error") if not res.get("success") else None
+        #     }
+        # else:
+        #     email_summary["scientific_officer"] = {
+        #         "name": so_name,
+        #         "role": "Scientific Officer",
+        #         "email": None,
+        #         "status": "not_sent",
+        #         "reason": "No email address registered for this Scientific Officer"
+        #     }
+        # 
+        # # 3b. Email ONLY to Business Leaders (BLs) matching selected division and territories
+        # bl_users = get_matching_bls_for_tour_plan(
+        #     db=db,
+        #     divisions=plan.divisions,
+        #     territories=plan.territories
+        # )
+        # 
+        # seen_emails = set()
+        # for bl in bl_users:
+        #     bl_email = (bl.email1 or "").strip()
+        #     bl_name = bl.Emp_Name or bl.Territory or "Business Leader"
+        #     bl_div = bl.Division or ""
+        #     bl_terr = bl.Territory or ""
+        #     if bl_email and bl_email not in seen_emails:
+        #         seen_emails.add(bl_email)
+        #         bl_subject = f"Tour Plan Notification: {bl_div or 'Division'} ({plan.from_date} to {plan.to_date}) | Pulse Scientific Office"
+        #         bl_html = build_tour_plan_email_html(
+        #             recipient_name=bl_name,
+        #             recipient_role=f"Business Leader ({bl_div})",
+        #             is_so=False,
+        #             plan_data=plan_dict,
+        #             created_by_name=creator_name
+        #         )
+        #         res = send_email(to_email=bl_email, subject=bl_subject, html_content=bl_html)
+        #         email_summary["business_leaders"].append({
+        #             "name": bl_name,
+        #             "role": f"Business Leader ({bl_div})" if bl_div else "Business Leader",
+        #             "email": bl_email,
+        #             "division": bl_div,
+        #             "territory": bl_terr,
+        #             "status": "sent" if res.get("success") else "failed",
+        #             "simulated": res.get("simulated", False),
+        #             "error": res.get("error") if not res.get("success") else None
+        #         })
+        #     elif not bl_email:
+        #         email_summary["business_leaders"].append({
+        #             "name": bl_name,
+        #             "role": f"Business Leader ({bl_div})" if bl_div else "Business Leader",
+        #             "email": None,
+        #             "division": bl_div,
+        #             "territory": bl_terr,
+        #             "status": "not_sent",
+        #             "reason": "No email address registered"
+        #         })
+        # 
+        # # Calculate delivery stats
+        # so_status = email_summary["scientific_officer"]["status"] if email_summary["scientific_officer"] else "not_sent"
+        # bl_sent_count = len([b for b in email_summary["business_leaders"] if b["status"] == "sent"])
+        # bl_failed_count = len([b for b in email_summary["business_leaders"] if b["status"] == "failed"])
+        # bl_skipped_count = len([b for b in email_summary["business_leaders"] if b["status"] == "not_sent"])
+        # total_recipients = (1 if email_summary["scientific_officer"] else 0) + len(email_summary["business_leaders"])
+        # total_sent = (1 if so_status == "sent" else 0) + bl_sent_count
+        # 
+        # email_summary["stats"] = {
+        #     "total_recipients": total_recipients,
+        #     "total_sent": total_sent,
+        #     "total_failed": (1 if so_status == "failed" else 0) + bl_failed_count,
+        #     "total_skipped": (1 if so_status == "not_sent" else 0) + bl_skipped_count,
+        #     "so_sent": so_status == "sent",
+        #     "bl_sent_count": bl_sent_count,
+        #     "bl_total_count": len(email_summary["business_leaders"])
+        # }
+        # ==================== END TOUR PLAN EMAIL SENDING (COMMENTED OUT) ====================
 
         # Persist email_status in tour_plans record
         db_plan.email_status = json.dumps(email_summary)
@@ -3110,5 +3121,7 @@ def delete_tour_plan(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    host = os.getenv("APP_HOST", "0.0.0.0")
+    port = int(os.getenv("APP_PORT", 8000))
+    uvicorn.run("main:app", host=host, port=port, reload=True)
 
