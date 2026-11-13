@@ -177,15 +177,14 @@ def get_brands(
 
 @app.get("/api/doctors", response_model=List[schemas.Doctor])
 def get_doctors(
-    priority_only: bool = Query(False, description="Filter priority doctors only"),
+    priority_only: bool = Query(True, description="Filter priority doctors only (default True)"),
     db: Session = Depends(get_db)
 ):
-    """Get all doctors, optionally filtered by priority"""
-    query = db.query(models.Doctor)
+    """Get priority doctors only (is_priority_doctor == True)"""
+    query = db.query(models.Doctor).filter(models.Doctor.is_priority_doctor == True)
     if priority_only:
         query = query.filter(models.Doctor.is_priority_doctor == True)
     doctors = query.order_by(
-        models.Doctor.is_priority_doctor.desc(),
         models.Doctor.name
     ).all()
     return doctors
@@ -396,10 +395,10 @@ def get_patches_by_territory(
     selected_territory = territory.strip().upper()
 
     # =========================================================
-    # 3. START QUERY
+    # 3. START QUERY (Only Priority Doctors)
     # =========================================================
 
-    query = db.query(models.Doctor)
+    query = db.query(models.Doctor).filter(models.Doctor.is_priority_doctor == True)
 
     # =========================================================
     # 4. FILTER SELECTED TERRITORY ACROSS ALL HIERARCHY
@@ -498,7 +497,7 @@ def get_doctors_by_location(
     print(f"Patch: {patch}")
     print(f"BL Territory: {bl_territory}")
 
-    query = db.query(models.Doctor)
+    query = db.query(models.Doctor).filter(models.Doctor.is_priority_doctor == True)
 
     # ---------------------------------------------------------
     # REGION
@@ -584,7 +583,7 @@ def search_doctors(
     """
     Search for doctors by name or speciality, filtered by region, territory, patch, and BL territory.
     """
-    query = db.query(models.Doctor)
+    query = db.query(models.Doctor).filter(models.Doctor.is_priority_doctor == True)
 
     if region:
         query = query.filter(models.Doctor.region == region)
@@ -614,7 +613,7 @@ def search_doctors(
 @app.get("/api/doctors/all_details")
 def get_all_doctors_details(db: Session = Depends(get_db)):
     """Temporarily get all doctor details for debugging."""
-    doctors = db.query(models.Doctor).all()
+    doctors = db.query(models.Doctor).filter(models.Doctor.is_priority_doctor == True).all()
     return [{
         "id": doctor.id,
         "name": doctor.name,
@@ -2936,10 +2935,11 @@ def get_tour_plans(
                         models.Request.request_date <= p.to_date
                     ).scalar() or 0
 
-                    # Total doctors in master database for these divisions and territories
+                    # Total priority doctors in master database for these divisions and territories
                     total_master_docs_count = db.query(func.count(models.Doctor.id)).filter(
                         func.upper(func.trim(models.Doctor.division)).in_(norm_divs),
-                        func.upper(func.trim(models.Doctor.territory)).in_(norm_terrs)
+                        func.upper(func.trim(models.Doctor.territory)).in_(norm_terrs),
+                        models.Doctor.is_priority_doctor == True
                     ).scalar() or 0
 
                     # Breakdown by territory (assigned doctors with requests in date range)
@@ -3072,7 +3072,8 @@ def get_tour_plan_detail(
     total_assigned_doctors = len(set(r["doctor_id"] for r in assigned_requests))
     total_master_docs = db.query(func.count(models.Doctor.id)).filter(
         func.upper(func.trim(models.Doctor.division)).in_(norm_divs),
-        func.upper(func.trim(models.Doctor.territory)).in_(norm_terrs)
+        func.upper(func.trim(models.Doctor.territory)).in_(norm_terrs),
+        models.Doctor.is_priority_doctor == True
     ).scalar() or 0
 
     return {
@@ -3100,6 +3101,103 @@ def get_tour_plan_detail(
         "assigned_requests": assigned_requests
     }
 
+@app.put("/api/tour-plans/{plan_id}")
+def update_tour_plan(
+    plan_id: int,
+    plan_data: schemas.TourPlanUpdate,
+    current_user_role: Optional[str] = Query(None),
+    current_user_name: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    """Allows Asst General Manager or Admin to update an existing tour plan"""
+    caller_role = (current_user_role or "").strip()
+    allowed_roles = ["Asst General Manager", "Associate Vice President", "Admin", "admin"]
+    if caller_role not in allowed_roles:
+        raise HTTPException(
+            status_code=403,
+            detail="Permission denied: Only Asst General Manager or Admin can edit tour plans"
+        )
+
+    plan = db.query(models.TourPlan).filter(models.TourPlan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Tour plan not found")
+
+    if plan_data.from_date > plan_data.to_date:
+        raise HTTPException(status_code=400, detail="From Date cannot be later than To Date.")
+
+    if not plan_data.divisions:
+        raise HTTPException(status_code=400, detail="Please select at least one division.")
+
+    if not plan_data.territories:
+        raise HTTPException(status_code=400, detail="Please select at least one territory.")
+
+    if not plan_data.assigned_so:
+        raise HTTPException(status_code=400, detail="Please select a Scientific Officer to assign.")
+
+    import json
+    from calendar import month_name
+
+    month_val = plan_data.month or month_name[plan_data.from_date.month]
+    year_val = plan_data.year or str(plan_data.from_date.year)
+
+    so_user = None
+    if plan_data.assigned_so_id:
+        so_user = db.query(models.User).filter(models.User.id == plan_data.assigned_so_id).first()
+    if not so_user and plan_data.assigned_so_code:
+        so_user = db.query(models.User).filter(models.User.Emp_Code == plan_data.assigned_so_code).first()
+    if not so_user and plan_data.assigned_so:
+        so_user = db.query(models.User).filter(
+            models.User.Role.in_(["MSL", "Scientific Officer"]),
+            models.User.Emp_Name == plan_data.assigned_so
+        ).first()
+
+    target_so_email = None
+    if getattr(plan_data, "assigned_so_email", None) and plan_data.assigned_so_email.strip():
+        target_so_email = plan_data.assigned_so_email.strip()
+        if so_user and (not so_user.email1 or not so_user.email1.strip()):
+            so_user.email1 = target_so_email
+            db.commit()
+    elif so_user and so_user.email1 and so_user.email1.strip():
+        target_so_email = so_user.email1.strip()
+
+    plan.from_date = plan_data.from_date
+    plan.to_date = plan_data.to_date
+    plan.month = month_val
+    plan.year = year_val
+    plan.divisions = json.dumps(plan_data.divisions)
+    plan.territories = json.dumps(plan_data.territories)
+    plan.assigned_so = plan_data.assigned_so
+    plan.assigned_so_id = plan_data.assigned_so_id
+    plan.assigned_so_code = plan_data.assigned_so_code
+    plan.assigned_so_email = target_so_email
+    plan.remarks = plan_data.remarks or ""
+    plan.updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(plan)
+
+    return {
+        "message": "Tour plan updated successfully",
+        "plan": {
+            "id": plan.id,
+            "from_date": plan.from_date,
+            "to_date": plan.to_date,
+            "month": plan.month,
+            "year": plan.year,
+            "divisions": json.loads(plan.divisions) if plan.divisions else [],
+            "territories": json.loads(plan.territories) if plan.territories else [],
+            "assigned_so": plan.assigned_so,
+            "assigned_so_id": plan.assigned_so_id,
+            "assigned_so_code": plan.assigned_so_code,
+            "assigned_so_email": plan.assigned_so_email,
+            "created_by": plan.created_by,
+            "created_by_role": plan.created_by_role,
+            "status": plan.status,
+            "remarks": plan.remarks,
+            "updated_at": plan.updated_at
+        }
+    }
+
 @app.delete("/api/tour-plans/{plan_id}")
 def delete_tour_plan(
     plan_id: int,
@@ -3123,5 +3221,5 @@ if __name__ == "__main__":
     import uvicorn
     host = os.getenv("APP_HOST", "0.0.0.0")
     port = int(os.getenv("APP_PORT", 8000))
-    uvicorn.run("main:app", host=host, port=port, reload=True)
+    uvicorn.run("main:app", host='127.0.0.1', port=8000, reload=True)
 

@@ -434,6 +434,9 @@ class TourPlanCreate(TourPlanBase):
     created_by_emp_code: Optional[str] = None
     created_by_role: Optional[str] = "Asst General Manager"
 
+class TourPlanUpdate(TourPlanBase):
+    pass
+
 class TourPlanResponse(BaseModel):
     id: int
     from_date: date

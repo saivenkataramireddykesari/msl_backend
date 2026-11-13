@@ -186,9 +186,10 @@ class HierarchyService:
             func.upper(func.trim(Doctor.sbuh_territory)).in_(accessible_territories_upper)
         ]
 
-        # Get regions from Doctor table, applying normalization and filtering
+        # Get regions from Doctor table, applying normalization and filtering (Priority Doctors only)
         doctor_regions_query = self.db.query(Doctor.region).filter(
-            or_(*doctor_territory_filters)
+            or_(*doctor_territory_filters),
+            Doctor.is_priority_doctor == True
         ).distinct()
         doctor_regions = doctor_regions_query.all()
         
@@ -242,7 +243,8 @@ class HierarchyService:
         ]
         
         patches = self.db.query(Doctor.patch).filter(
-            or_(*doctor_territory_filters)
+            or_(*doctor_territory_filters),
+            Doctor.is_priority_doctor == True
         ).distinct().all()
 
         print(f"DEBUG (Patches): Raw patches query result: {patches}")
@@ -403,7 +405,8 @@ class HierarchyService:
             ]
 
             query = self.db.query(Doctor.patch).filter(
-                or_(*doctor_territory_filters)
+                or_(*doctor_territory_filters),
+                Doctor.is_priority_doctor == True
             )
 
             if selected_territory:
@@ -460,7 +463,8 @@ class HierarchyService:
         ]
 
         doctors = self.db.query(Doctor).filter(
-            or_(*doctor_territory_filters)
+            or_(*doctor_territory_filters),
+            Doctor.is_priority_doctor == True
         ).all()
         
         # Add new debug log as per task requirement
