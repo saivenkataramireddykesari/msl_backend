@@ -258,7 +258,7 @@ def get_access_data(
             "sbuh_territory": d.sbuh_territory,
             "patch": d.patch,
             "is_priority_doctor": d.is_priority_doctor
-        } for d in doctors
+        } for d in doctors if d.is_priority_doctor
     ]
     
     response_payload = {
@@ -277,7 +277,7 @@ def get_regions_by_bl_location(
     db: Session = Depends(get_db)
 ):
     """Get unique regions. If the user is a BL, filter by their assigned region."""
-    all_regions_query = db.query(models.Doctor.region).distinct()
+    all_regions_query = db.query(models.Doctor.region).filter(models.Doctor.is_priority_doctor == True).distinct()
     
     if current_user_role in ["BL", "BM"] and current_user_employee_id:
         # Fetch the user's assigned region
@@ -306,7 +306,8 @@ def get_territories_by_region(
 ):
     """Get unique territories based on selected region and optional BL location"""
     query = db.query(models.Doctor.territory).filter(
-        models.Doctor.region == region
+        models.Doctor.region == region,
+        models.Doctor.is_priority_doctor == True
     ).distinct()
     
     if current_user_role in ("BL", "BH") and current_user_employee_id:
@@ -743,7 +744,6 @@ def get_doctor_history(
     interactions = db.query(models.DoctorInteraction).filter(
         models.DoctorInteraction.doctor_name == doctor_name
     ).order_by(models.DoctorInteraction.visit_date.desc()).all()
-
     return interactions
 
 # ==================== REQUESTS ====================
@@ -774,6 +774,14 @@ def create_request(request: schemas.RequestCreate, db: Session = Depends(get_db)
     if not doctor:
         print(f"DEBUG - Doctor not found for ID: {request.doctor_id}")
         raise HTTPException(status_code=404, detail="Doctor not found")
+    
+    # Strongly verify doctor is a priority doctor
+    if not doctor.is_priority_doctor:
+        print(f"SECURITY - Attempted to raise request for non-priority doctor: ID={request.doctor_id}, Name={doctor.name}")
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot raise request: Selected doctor is not a priority doctor."
+        )
     
     print(f"DEBUG - Doctor found: {doctor.name} (doctor_id_ext={doctor.doctor_id_ext})")
 
@@ -2533,10 +2541,16 @@ def create_tour_plan(
                 detail="Access denied: Only Asst General Manager role can create a tour plan."
             )
 
-        if plan.from_date < date.today():
+        today = date.today()
+        # Allow dates from the first day of last month onwards
+        first_of_this_month = today.replace(day=1)
+        last_month_end = first_of_this_month - timedelta(days=1)
+        first_of_last_month = last_month_end.replace(day=1)
+
+        if plan.from_date < first_of_last_month:
             raise HTTPException(
                 status_code=400,
-                detail="From Date cannot be in the past. Please select current or future date."
+                detail="From Date cannot be earlier than last month."
             )
 
         if plan.from_date > plan.to_date:
@@ -2580,10 +2594,10 @@ def create_tour_plan(
 
         if plan_year_num is not None:
             plan_month_num = month_list.index(month_val) if month_val in month_list else plan.from_date.month
-            if plan_year_num < today.year or (plan_year_num == today.year and plan_month_num < today.month):
+            if (plan_year_num, plan_month_num) < (first_of_last_month.year, first_of_last_month.month):
                 raise HTTPException(
                     status_code=400,
-                    detail="Tour Plan Month and Year cannot be in the past. Please select current or future month and year."
+                    detail="Tour Plan Month and Year cannot be earlier than last month."
                 )
         creator_name = current_user_name or plan.created_by or "Asst General Manager"
 
@@ -2855,8 +2869,8 @@ def get_tour_plans(
                 p_terrs = [t.strip() for t in p.territories.split(",") if t.strip()]
 
             # Role filtering logic
-            if user_role in ["Asst General Manager", "Associate Vice President", "Admin", "admin", ""]:
-                # Full visibility
+            if user_role in ["Asst General Manager", "Associate Vice President", "Admin", "admin", "BM", ""]:
+                # Full visibility (BM filtration removed)
                 pass
             elif user_role in ["MSL", "Scientific Officer"]:
                 # Visibility only if assigned to this SO
